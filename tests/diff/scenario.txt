@@ -1,0 +1,32 @@
+# Differential test scenario, executed identically against the original
+# PowerPC MFSBaseLib2891 (emulated) and against libdsdual4.
+#
+# SP name ulx uly width length pixels lines mode bits flags er eg eb xres yres focus mlines mscan msample aps final nonstd readlines chunklines
+INIT
+CAL
+SP full3200   0   0 3120   48 3120   48 4 48 0x9048 142 142 142 3200 3200  37 0 0 0 0 1 0  48  8
+SP crop1600 100 200  800   50  800   50 4 48 0x9048 142 142 142 1600 1600  10 0 0 0 0 1 0  50 16
+SP final800   0   0  780   40  780   40 4 48 0x9048 142 142 142  800  800 -20 0 0 0 0 1 0  40 40
+SP prev800    0   0  780   40  780   40 4 48 0x9048  85  77  71  800  800   0 0 0 0 0 0 0  40 13
+SP prev400    8  16  388   30  388   30 4 48 0x9048 100 100 100  400  400   0 0 0 0 0 0 0  30 30
+SP ms4        0   0  780   12  780   12 4 48 0x9068 142 142 142  800  800  37 0 0 4 0 1 0  48  1
+SP bw1600     0   0 1560   20 1560   20 2 16 0x9048 100 100 100 1600 1600  37 0 0 0 0 1 0  20 20
+SP aps1600   40  40 1000   20 1000   20 4 48 0x9048 142 142 142 1600 1600  37 0 0 0 1 1 0  20 20
+SP rgb8_1600  0   0 1560   24 1560   24 4 24 0x9048 142 142 142 1600 1600  37 0 0 0 0 1 0  24  7
+SP ms2        0   0  780    9  780    9 4 48 0x9068 142 142 142  800  800  37 0 0 2 0 1 0  18  1
+SP prev200    0   0  196   20  196   20 4 48 0x9048 100 100 100  200  200   0 0 0 0 0 0 0  20  5
+SP prefocus 1560 2340 256    1  256    1 4 48 0x90cc 152 152 152 3200 3200 250 0 0 0 0 0 0   1  1
+DARK 1.5384615384615385 3.3333333333333335 5.0
+SP nega1600   0   0 1560   30 1560   30 4 48 0x9048 153 333 500 1600 1600  37 0 0 0 0 1 1  30 10
+FOCUS 37
+FOCUS -20
+FOCUS -20
+FOCUSSCAN 1560 2340 256 3 250 200 190 180
+HOLDER 3
+HOLDER 9
+HOLDER 255
+FEED
+RESET
+SETSTATE 1
+INITSCANNER
+FWDL

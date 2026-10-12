@@ -1,0 +1,180 @@
+# dsdual4 — DiMAGE Scan Dual IV driver for modern macOS
+
+A native, user-space macOS driver for the **Konica Minolta DiMAGE Scan Dual IV**
+film scanner (USB `132b:000a`, firmware "FS-V31"), whose official software only
+exists for PowerPC Macs (Mac OS 9 / Mac OS X 10.2–10.4).
+
+It was produced by reverse engineering the PowerPC driver in this folder's
+`DS_Dual4_extracted/` (CFM/PEF libraries `MFSBaseLib2891`, `MFSLib2891`,
+`MFSIFLib2891`, the Mach-O USB bundle `MFSIOUsb2891` and the Mac OS 9 class
+driver). The scanner protocol, calibration, motor and exposure logic were
+recovered and reimplemented in portable C. **The port is byte-identical to the
+original driver**: running the original PowerPC code in a CPU emulator side by
+side with this library produces the same scanner traffic, down to every
+command, window block, shading table, motor table and firmware byte (see
+[Verification](#verification)).
+
+What you get:
+
+* **`dsdual4`**: a command line tool to initialise and calibrate the scanner,
+  move between frames, eject, focus and autofocus, preview and scan (16-bit
+  TIFF, up to 3200 dpi).
+* **`dsdual4 serve`**: an **AirScan (eSCL) bridge**. The scanner then shows up
+  in **Image Capture**, **Preview → File → Import from Scanner** and any other
+  app that uses macOS's scanner support. Film-specific options (film type,
+  frame, autofocus, inversion) are set on a small settings page.
+* **`libdsdual4`**: a C library (`include/dsdual4.h`) for your own front ends.
+
+No kernel extension is needed. The scanner is a vendor-specific USB device, so
+a normal user process can open it (Apple silicon and Intel; macOS 11 or later).
+
+## Build
+
+```sh
+xcode-select --install        # if needed
+make                          # universal arm64 + x86_64 binary in build/
+make test                     # end-to-end tests against the built-in simulator
+sudo make install FIRMWARE="../DS_Dual4_extracted/DS Dual4/Firmware/DS_Dual4.BIN"
+```
+
+## Using the command line tool
+
+```sh
+dsdual4 info                               # identification, holder, frames
+dsdual4 init                               # lamp warm-up + calibration (~1-2 min)
+dsdual4 preview -o preview.tiff            # 800 dpi preview of the current frame
+dsdual4 scan --frame 3 --dpi 3200 -o slide3.tiff
+dsdual4 scan --frame 2 --film nega --invert -o neg2.tiff
+dsdual4 scan --dpi 1600 --area 200,300,1000,800 --samples 4 -o crop.tiff
+dsdual4 scan-all --dpi 3200 -o roll        # roll-1.tiff ... roll-6.tiff
+dsdual4 autofocus --frame 1                # prints the best focus position
+dsdual4 scan --focus 37 -o fixed.tiff      # manual focus (−200 … 200)
+dsdual4 eject
+```
+
+Scan options: `--film posi|nega|bw-posi|bw-nega`, `--dpi 50..3200`,
+`--bits 8|16`, `--exposure r,g,b` (factors) or `--ev ±stops`,
+`--focus auto|keep|N`, `--samples 1|2|4|8` (multi-sample noise reduction),
+`--invert`, `--raw` (no host digital gain), `--flip-x`, `--flip-y`,
+`--rotate 90|180|270`. Add `-v` for progress details, `-vvv` for a protocol
+trace, `-vvvv` for hex dumps.
+
+Each command opens the scanner and initialises it if needed. The first run
+after power-on warms up the lamp and calibrates, and the shading tables are
+cached in `~/Library/Application Support/dsdual4/`.
+
+## Using it from Image Capture / Preview
+
+```sh
+dsdual4 serve --local          # keep running; Ctrl-C to stop
+```
+
+Then open **Image Capture** (or **Preview → File → Import from Scanner**) and
+pick *DiMAGE Scan Dual IV*. The scan area is one 35 mm frame (0.97 × 1.46 in).
+Open <http://localhost:8090/> to choose the film type, the frame, autofocus,
+exposure correction, multi-sampling and negative inversion, or to eject the
+holder.
+
+To have it start automatically at login and whenever the scanner is plugged in:
+
+```sh
+make install-agent             # installs ~/Library/LaunchAgents/org.dsdual4.airscan.plist
+make uninstall-agent
+```
+
+`--local` advertises the scanner only on this Mac. Without it, other Macs and
+iPads on the network can use it too.
+
+## Images
+
+Scans are the scanner's linear 16-bit data after the original driver's
+shading correction, exposure model and digital gain. The image is not
+gamma-encoded or colour-managed, just like the original's "raw/linear" output,
+so expect a dark-looking image in viewers. Apply a curve in your editor, or use
+8-bit output for a quick look. `--invert` does a simple per-channel inversion
+of negatives (orange-mask removal by auto levels). The original software's
+image processing (Pixel Polish, Auto Dust Brush, Grain Dissolver, colour
+matching) is not included. The Dual IV has no infrared channel, so there is
+no ICE.
+
+Orientation: lines are delivered in the scanner's order. If your scans come
+out mirrored, use `--flip-x` (the right default depends on how the film is
+loaded and has not been checked on hardware).
+
+## Verification
+
+There was no scanner available while writing this. Three independent checks
+were used instead:
+
+1. **Differential test against the original binary** (`make difftest`): the
+   original PowerPC `MFSBaseLib2891` code runs under the Unicorn emulator (as a
+   PowerPC G4) with its Mac OS Toolbox imports stubbed. Its SCSI commands go to
+   the same protocol simulator the port uses, and a scenario covering the
+   following is executed on both:
+   * initialisation (reset, lamp warm-up, calibration)
+   * 3200, 1600, 800, 400 and 200 dpi colour and gray scans, 8-bit and 16-bit,
+     crops and APS offsets
+   * multi-sampling
+   * dark recalibration for negatives
+   * autofocus multi-scan sessions
+   * holder control and range errors
+   * the firmware update
+
+   **All 327 scanner commands and 108 image reads are identical.**
+   ```sh
+   pip3 install unicorn
+   ORIGINAL_LIB=../DS_Dual4_extracted/MFSBaseLib2891 \
+   DSD4_FIRMWARE="../DS_Dual4_extracted/DS Dual4/Firmware/DS_Dual4.BIN" make difftest
+   ```
+2. **Protocol simulator** (`make test`, `dsdual4 --sim …`): a model of the
+   scanner, using the real INQUIRY block from the firmware image, that checks
+   everything the host sends and returns a focus-dependent test chart. It runs
+   15 end-to-end tests, including autofocus convergence.
+3. **macOS integration**: `tests/ica/ica_probe.swift` uses Apple's
+   ImageCaptureCore (the framework behind Image Capture and Preview) to
+   discover the AirScan bridge and complete a scan.
+
+What is **not** verified yet is behaviour on real hardware (timing, the exact
+meaning of a few device-reported values, image orientation). Bug reports with
+`dsdual4 -vvv …` traces are the fastest way to fix such issues.
+
+## Firmware
+
+Like the original driver, `dsdual4` asks the scanner on first contact whether
+it wants a firmware image (READ 0x90). Only if the scanner requests it and the
+file is not older than the running firmware does it send `DS_Dual4.BIN`. This
+path is byte-identical to the original. The firmware file is not part of this
+project. It is read from your copy of the original software (`--firmware`,
+`$DSD4_FIRMWARE`, `./DS_Dual4.BIN` or the install prefix). Use
+`--no-firmware-check` to skip the check.
+
+## How it is organised
+
+| file | original counterpart |
+|---|---|
+| `src/usb_macos.c` | `MFSIOUsb2891.bundle` (IOKit USB transport) |
+| `src/avision.c` | `AVIOScanCommand`, `Cmd*` (SCSI command layer, sense mapping) |
+| `src/avlib.c` | the "AVI" library in `MFSBaseLib2891`: ability, calibration, SET WINDOW, shading upload, acceleration tables, data unpacking, firmware |
+| `src/calib.c` | `GetAverageData`, `BubbleSort`, `Calculate{Dark,White}ShadingData`, `DarkSmoothProcess` |
+| `src/scanner.c` | `CBaseScannerAVI`, `CBaseMethod2889` and `MFSLib` exposure/focus logic (`GetStdGain`, `CheckGainLimit`, `AutoFocus`, …) |
+| `src/escl.c` | new: AirScan/eSCL server for Image Capture |
+| `src/sim.c` | new: protocol-level scanner simulator |
+| `docs/PROTOCOL.md` | the recovered USB protocol |
+| `docs/re-tools/` | the reverse-engineering tools (PEF loader, Ghidra scripts) |
+| `tests/diff/` | differential test harness (original PowerPC code under emulation) |
+
+## Limitations
+
+* Index (thumbnail) scans, the original's automatic exposure, and its image
+  processing filters are not implemented. Exposure uses the original's standard
+  film factors plus your `--exposure`/`--ev` correction.
+* Final scans run at 800, 1600 or 3200 dpi on the scanner, as in the
+  original. Other resolutions are resampled on the Mac with an area filter
+  (the original used its own resampler).
+* APS (IX240) adapter support follows the original code but is untested.
+
+## Legal
+
+This is an independent, interoperability-driven reimplementation. It contains
+no code or firmware from Konica Minolta. "DiMAGE" and "Konica Minolta" are
+trademarks of their owners.
