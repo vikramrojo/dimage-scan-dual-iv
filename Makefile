@@ -60,7 +60,8 @@ pkg: all
 	rm -rf $(PKGROOT)
 	$(MAKE) install PREFIX=$(CURDIR)/$(PKGROOT)/usr/local FIRMWARE="$(FIRMWARE)"
 	install -m 644 packaging/org.dsdual4.airscan.plist $(PKGROOT)/usr/local/share/dsdual4/
-	install -m 644 README.md docs/PROTOCOL.md $(PKGROOT)/usr/local/share/dsdual4/
+	cat README.md > $(PKGROOT)/usr/local/share/dsdual4/README.md
+	cat docs/PROTOCOL.md > $(PKGROOT)/usr/local/share/dsdual4/PROTOCOL.md
 	xattr -cr $(PKGROOT)
 	COPYFILE_DISABLE=1 pkgbuild --root $(PKGROOT) --identifier org.dsdual4.driver --version $(VERSION) \
 	    --install-location / build/dsdual4-$(VERSION).pkg
