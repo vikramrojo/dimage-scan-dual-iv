@@ -362,6 +362,7 @@ dsd4_transport *dsd4_sim_open(const char *firmware_path, char *err, size_t errle
     }
     m->holder = 2;  /* 35 mm strip holder */
     m->frames = 6;
+    if (getenv("DSD4_SIM_APS")) { m->holder = 1; m->frames = 25; } /* APS cartridge adapter */
     m->frame = 1;
     const char *tr = getenv("DSD4_SIM_TRACE");
     if (tr) m->trace = fopen(tr, "w");

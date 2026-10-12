@@ -147,6 +147,7 @@ static void flip_x(dsd4_image *im)
 static void flip_y(dsd4_image *im)
 {
     uint8_t *tmp = malloc(im->stride);
+    if (!tmp) return;
     for (int a = 0, b = im->height - 1; a < b; a++, b--) {
         memcpy(tmp, im->data + (size_t)a * im->stride, im->stride);
         memcpy(im->data + (size_t)a * im->stride, im->data + (size_t)b * im->stride, im->stride);

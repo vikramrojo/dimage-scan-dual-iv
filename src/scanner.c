@@ -717,7 +717,8 @@ int dsd4_autofocus(dsd4 *s, const dsd4_scan_params *sp, int *best_out, dsd4_prog
 
     /* FocusAE: one line at focus 0, exposure so that the maximum is ~50 % */
     if (cb) cb(ud, "focus exposure", -1);
-    if (!pre_focus_scan(s, &af, 0, 3)) return fail(s);
+    int r = DSD4_OK;
+    if (!pre_focus_scan(s, &af, 0, 3)) { r = fail(s); goto out; }
     uint32_t mx = 0;
     for (unsigned i = 0; i < 256 * 3; i++) if ((af.line[i] >> 8) > mx) mx = af.line[i] >> 8;
     if (!mx) mx = 1;
@@ -729,7 +730,6 @@ int dsd4_autofocus(dsd4 *s, const dsd4_scan_params *sp, int *best_out, dsd4_prog
     const int16_t half = 200, lo_lim = -200; /* focus range 400 */
     uint32_t m, bestm = 0;
     int16_t best = 0;
-    int r = DSD4_OK;
     /* backlash: approach from +250 */
     if (!focus_scan(s, &af, 250, 3, NULL)) { r = fail(s); goto out; }
     av_delay_ticks(6);
@@ -827,9 +827,13 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
     ls.samples = (uint8_t)(sp->multi_sample > 0 ? sp->multi_sample : 1);
     if (ls.samples != 1 && ls.samples != 2 && ls.samples != 4 && ls.samples != 8) return DSD4_ERR_PARAM;
 
-    int r = film_format_check(s, &ls);
+    /* the film format follows the inserted holder: read it before validating */
+    dsd4_holder_info hi;
+    int r = dsd4_get_holder(s, &hi);
     if (r) return r;
-    ls.format_aps = s->holder_type == 1;
+    ls.format_aps = hi.raw_type == 1;
+    r = film_format_check(s, &ls);
+    if (r) return r;
 
     if (sp->frame > 0) {
         if (cb) cb(ud, "moving to frame", -1);
@@ -849,14 +853,26 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
     /* area at the scan resolution */
     uint32_t fw = (uint32_t)((uint64_t)a[0].w * scan_dpi / 3200), fh = (uint32_t)((uint64_t)a[0].h * scan_dpi / 3200);
     uint32_t x = 0, y = 0, w = fw, h = fh;
-    if (!sp->preview && sp->w > 0 && sp->h > 0) {
-        x = (uint32_t)(sp->x * k + 0.5);
-        y = (uint32_t)(sp->y * k + 0.5);
-        w = (uint32_t)(sp->w * k + 0.5);
-        h = (uint32_t)(sp->h * k + 0.5);
+    int crop = !sp->preview && sp->w > 0 && sp->h > 0;
+    uint32_t want_x = 0, want_w = 0, want_h = 0; /* requested area at the scan resolution */
+    if (crop) {
+        if (sp->x < 0 || sp->y < 0) return DSD4_ERR_PARAM;
+        double fx = sp->x * k, fy = sp->y * k, fwd = sp->w * k, fhd = sp->h * k;
+        if (fx + fwd > fw + 0.5 || fy + fhd > fh + 0.5) return DSD4_ERR_PARAM;
+        want_x = (uint32_t)fx;
+        x = want_x;
+        y = (uint32_t)fy;
+        want_w = (uint32_t)ceil(fwd);
+        want_h = (uint32_t)ceil(fhd);
+        h = want_h;
+        if (y + h > fh) h = fh - y;
+        w = (want_w + 3u) & ~3u; /* the scanner aligns colour lines to 4 pixels */
+        if (w > fw) w = fw & ~3u;
+        if ((uint64_t)x + w > fw) x = fw - w; /* keep the aligned width inside the frame */
+    } else {
+        w &= ~3u;
     }
-    w &= ~3u; /* the scanner aligns colour lines to 4 pixels */
-    if (x + w > fw || y + h > fh || w < 4 || h < 1) return DSD4_ERR_PARAM;
+    if ((uint64_t)x + w > fw || (uint64_t)y + h > fh || w < 4 || h < 1) return DSD4_ERR_PARAM;
     ls.x = x; ls.y = y; ls.w = w; ls.h = h;
     ls.dpi = (uint16_t)scan_dpi;
 
@@ -934,6 +950,21 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
         buf = rs;
         w = (uint32_t)dw;
         h = (uint32_t)dh;
+    }
+    if (crop) {
+        /* trim the alignment padding so the result is exactly the requested size */
+        const size_t bpp = (size_t)ch * 2;
+        uint32_t ox = (uint32_t)((want_x - x) / k + 0.5);
+        uint32_t ow = (uint32_t)sp->w, oh = (uint32_t)sp->h;
+        if (ox > w) ox = w;
+        if (ow > w - ox) ow = w - ox;
+        if (oh > h) oh = h;
+        if (ow != w || oh != h) {
+            for (uint32_t yy = 0; yy < oh; yy++)
+                memmove(buf + (size_t)yy * ow * bpp, buf + ((size_t)yy * w + ox) * bpp, (size_t)ow * bpp);
+            w = ow;
+            h = oh;
+        }
     }
     img->width = (int)w;
     img->height = (int)h;

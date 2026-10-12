@@ -39,6 +39,12 @@ run frame3      780x1170   scan --frame 3 --dpi 800 --focus 37 -o "$OUT/frame3.t
 run autofocus   -          autofocus --frame 2
 run scanall     780x1170   scan-all --dpi 800 --focus keep -o "$OUT/scanall"
 run eject       -          eject
+DSD4_SIM_APS=1 run aps800 544x948 scan --dpi 800 --focus 37 -o "$OUT/aps800.tiff"
+run crop700     97x61      scan --dpi 700 --focus 37 --area 3,3,97,61 -o "$OUT/crop700.tiff"
+if DSD4_SIM_TRACE=/dev/null "$BIN" --sim -q scan --dpi 200 --focus 37 --area=-8,0,40,40 -o "$OUT/neg.tiff" >/dev/null 2>&1; then
+    echo "FAIL negative-area accepted"; failn=$((failn+1)); else echo "ok   negative-area-rejected"; pass=$((pass+1)); fi
+if DSD4_SIM_TRACE=/dev/null "$BIN" --sim -q scan --dpi 200 --focus 37 --area 1,0,1073741823,1 -o "$OUT/big.tiff" >/dev/null 2>&1; then
+    echo "FAIL oversized-area accepted"; failn=$((failn+1)); else echo "ok   oversized-area-rejected"; pass=$((pass+1)); fi
 
 if grep -q "best focus position: 3[5-9]" "$OUT/autofocus.log"; then echo "ok   autofocus-converges"; pass=$((pass+1));
 else echo "FAIL autofocus did not converge:"; cat "$OUT/autofocus.log"; failn=$((failn+1)); fi

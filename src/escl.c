@@ -34,6 +34,7 @@ typedef struct {
     int used;
     int state;            /* 0 pending, 1 processing, 2 done, 3 failed, 4 canceled */
     int delivered;
+    int thread_active;    /* a job_thread still owns this slot */
     time_t created;
     dsd4_scan_params p;
     int gray, bits16;
@@ -94,8 +95,11 @@ static void sb_add(sbuf *b, const char *fmt, ...)
         va_end(ap);
         if (k < 0) return;
         if (b->p && b->n + (size_t)k < b->cap) { b->n += (size_t)k; return; }
-        b->cap = (b->cap + (size_t)k + 1) * 2;
-        b->p = realloc(b->p, b->cap);
+        size_t cap = (b->cap + (size_t)k + 1) * 2;
+        char *np = realloc(b->p, cap);
+        if (!np) return; /* keep the old buffer; output is truncated */
+        b->p = np;
+        b->cap = cap;
     }
 }
 
@@ -177,6 +181,14 @@ static uint8_t *encode(const dsd4_image *im, const char *fmt, size_t *len)
     } else {
         CFStringRef uti = jpeg ? CFSTR("public.jpeg") : !strcmp(fmt, "image/png") ? CFSTR("public.png") : CFSTR("public.tiff");
         CGImageDestinationRef d = CGImageDestinationCreateWithData(out, uti, 1, NULL);
+        if (!d) {
+            CGImageRelease(img);
+            CGDataProviderRelease(dp);
+            CGColorSpaceRelease(cs);
+            free(px);
+            CFRelease(out);
+            return NULL;
+        }
         double dpi = im->dpi, q = 0.92;
         CFNumberRef ndpi = CFNumberCreate(NULL, kCFNumberDoubleType, &dpi);
         CFNumberRef nq = CFNumberCreate(NULL, kCFNumberDoubleType, &q);
@@ -216,7 +228,12 @@ static void *job_thread(void *arg)
     job_t *j = arg;
     pthread_mutex_lock(&g.scanner_lock);
     pthread_mutex_lock(&g.lock);
-    if (j->state == 4) { pthread_mutex_unlock(&g.lock); pthread_mutex_unlock(&g.scanner_lock); return NULL; }
+    if (j->state == 4) {
+        j->thread_active = 0;
+        pthread_mutex_unlock(&g.lock);
+        pthread_mutex_unlock(&g.scanner_lock);
+        return NULL;
+    }
     j->state = 1;
     g.busy = 1;
     pthread_mutex_unlock(&g.lock);
@@ -260,6 +277,8 @@ static void *job_thread(void *arg)
     j->doc_len = len;
     j->error = r;
     if (j->state != 4) j->state = doc ? 2 : 3;
+    else { free(doc); j->doc = NULL; j->doc_len = 0; }
+    j->thread_active = 0;
     g.busy = 0;
     snprintf(g.status, sizeof g.status, "%s", doc ? "idle" : dsd4_strerror(r));
     pthread_cond_broadcast(&g.cond);
@@ -324,6 +343,7 @@ static int read_request(int fd, request *rq, char *buf, size_t cap, size_t *have
                 *have += (size_t)k;
             }
             rq->body = malloc(cl + 1);
+            if (!rq->body) return -1;
             memcpy(rq->body, buf + hl, cl);
             rq->body[cl] = 0;
             rq->body_len = cl;
@@ -416,7 +436,9 @@ static job_t *new_job(void)
     job_t *oldest = NULL;
     for (int i = 0; i < MAX_JOBS; i++) {
         if (!g.jobs[i].used) return &g.jobs[i];
-        if (g.jobs[i].state >= 2 && (!oldest || g.jobs[i].created < oldest->created)) oldest = &g.jobs[i];
+        if (g.jobs[i].state >= 2 && !g.jobs[i].thread_active &&
+            (!oldest || g.jobs[i].created < oldest->created))
+            oldest = &g.jobs[i];
     }
     if (oldest) { free(oldest->doc); memset(oldest, 0, sizeof *oldest); }
     return oldest;
@@ -442,6 +464,13 @@ static void post_scan_job(int fd, const request *rq)
     if (xml_get(rq->body, "YOffset", v, sizeof v)) y = atol(v);
     if (dpi < 50) dpi = 50;
     if (dpi > 3200) dpi = 3200;
+    /* clamp the client's region (1/300 inch) to one 35 mm frame */
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > 288) x = 288;
+    if (y > 434) y = 434;
+    if (w < 0 || w > 292 - x) w = 292 - x;
+    if (h < 0 || h > 438 - y) h = 438 - y;
 
     pthread_mutex_lock(&g.lock);
     job_t *j = new_job();
@@ -483,8 +512,13 @@ static void post_scan_job(int fd, const request *rq)
     snprintf(loc, sizeof loc, "Location: http://%s:%d/eSCL/ScanJobs/%s\r\n", g.host, g.port, j->id);
     logmsg("new scan job %s: %d dpi %s %s%s", j->id, dpi, mode, fmt, j->p.preview ? " (preview)" : "");
     pthread_t th;
-    pthread_create(&th, NULL, job_thread, j);
-    pthread_detach(th);
+    j->thread_active = 1;
+    if (pthread_create(&th, NULL, job_thread, j) != 0) {
+        j->thread_active = 0;
+        j->state = 3;
+    } else {
+        pthread_detach(th);
+    }
     pthread_mutex_unlock(&g.lock);
     respond(fd, rq, 201, "Created", NULL, NULL, 0, loc);
 }
@@ -494,8 +528,8 @@ static void next_document(int fd, const request *rq, const char *id)
     pthread_mutex_lock(&g.lock);
     job_t *j = find_job(id);
     if (!j) { pthread_mutex_unlock(&g.lock); respond(fd, rq, 404, "Not Found", NULL, NULL, 0, NULL); return; }
-    while (j->state < 2) pthread_cond_wait(&g.cond, &g.lock);
-    if (j->state != 2 || j->delivered) {
+    while (j->used && !strcmp(j->id, id) && j->state < 2) pthread_cond_wait(&g.cond, &g.lock);
+    if (!j->used || strcmp(j->id, id) || j->state != 2 || j->delivered) {
         pthread_mutex_unlock(&g.lock);
         respond(fd, rq, 404, "Not Found", NULL, NULL, 0, NULL);
         return;

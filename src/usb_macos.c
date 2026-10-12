@@ -89,6 +89,8 @@ static int usb_exec(dsd4_transport *t, const uint8_t cdb[10], enum dsd4_dir dir,
             if (kr != kIOReturnSuccess) { recover_pipe(p, p->pipe_in, kr); return -3; }
             if (n == 0) return -4;
             done += n;
+            /* a short packet ends the data phase; the status byte follows */
+            if (done < len && n % (p->mps_in ? p->mps_in : 512)) break;
         }
     }
 
