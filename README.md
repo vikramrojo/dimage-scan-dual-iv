@@ -140,13 +140,12 @@ meaning of a few device-reported values, image orientation). Bug reports with
 
 ## Firmware
 
-Like the original driver, `dsdual4` asks the scanner on first contact whether
-it wants a firmware image (READ 0x90). Only if the scanner requests it and the
-file is not older than the running firmware does it send `DS_Dual4.BIN`. This
-path is byte-identical to the original. The firmware file is not part of this
-project. It is read from your copy of the original software (`--firmware`,
-`$DSD4_FIRMWARE`, `./DS_Dual4.BIN` or the install prefix). Use
-`--no-firmware-check` to skip the check.
+Firmware updates are **off by default**. `dsdual4` never writes to the
+scanner's flash unless you pass `--firmware-update`. In that case, like the
+original driver, it asks the scanner whether it wants an image (READ 0x90)
+and sends `DS_Dual4.BIN` only if the scanner requests it and the file is not
+older than the running firmware. This path is byte-identical to the original
+but has not been tried on hardware. Scanning works on the installed firmware.
 
 ## How it is organised
 

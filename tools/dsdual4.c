@@ -41,7 +41,8 @@ static void usage(void)
 "global options:\n"
 "  --sim                     use the built-in protocol simulator instead of USB\n"
 "  --firmware <file>         DS_Dual4.BIN used for the firmware check\n"
-"  --no-firmware-check       never download firmware\n"
+"  --firmware-update         allow sending DS_Dual4.BIN if the scanner asks\n"
+"                            for it (off by default; never needed to scan)\n"
 "  -v / -q                   more / less output (repeat -v for protocol traces)\n"
 "\n"
 "scan options:\n"
@@ -265,12 +266,13 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
 
 int main(int argc, char **argv)
 {
-    int use_sim = 0, fw_check = 1;
+    int use_sim = 0, fw_check = 0;
     const char *fw = NULL;
     int i = 1;
     for (; i < argc && argv[i][0] == '-'; i++) {
         if (!strcmp(argv[i], "--sim")) use_sim = 1;
         else if (!strcmp(argv[i], "--no-firmware-check")) fw_check = 0;
+        else if (!strcmp(argv[i], "--firmware-update")) fw_check = 1;
         else if (!strcmp(argv[i], "--firmware") && i + 1 < argc) fw = argv[++i];
         else if (!strncmp(argv[i], "-v", 2)) g_verbose += (int)strlen(argv[i]) - 1;
         else if (!strcmp(argv[i], "-q")) g_verbose = 0;
