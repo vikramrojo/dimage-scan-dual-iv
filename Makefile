@@ -51,7 +51,21 @@ uninstall-agent:
 	launchctl bootout gui/$$(id -u) $(AGENT) 2>/dev/null || true
 	rm -f $(AGENT)
 
+VERSION ?= 1.0.0
+PKGROOT  = build/pkgroot
+
+# macOS installer package (unsigned). FIRMWARE=... optionally bundles your
+# copy of DS_Dual4.BIN under /usr/local/share/dsdual4.
+pkg: all
+	rm -rf $(PKGROOT)
+	$(MAKE) install PREFIX=$(CURDIR)/$(PKGROOT)/usr/local FIRMWARE="$(FIRMWARE)"
+	install -m 644 packaging/org.dsdual4.airscan.plist $(PKGROOT)/usr/local/share/dsdual4/
+	install -m 644 README.md docs/PROTOCOL.md $(PKGROOT)/usr/local/share/dsdual4/
+	xattr -cr $(PKGROOT)
+	COPYFILE_DISABLE=1 pkgbuild --root $(PKGROOT) --identifier org.dsdual4.driver --version $(VERSION) \
+	    --install-location / build/dsdual4-$(VERSION).pkg
+
 clean:
 	rm -rf build
 
-.PHONY: all test difftest install install-agent uninstall-agent clean
+.PHONY: all pkg test difftest install install-agent uninstall-agent clean
