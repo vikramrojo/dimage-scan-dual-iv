@@ -78,6 +78,10 @@ static void usage(void)
 "  convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n"
 "                            apply the original Minolta negative processing to\n"
 "                            an existing raw negative scan (no scanner needed)\n"
+"  deblur FILE.dng... [--level low|high] [-o OUT.dng]\n"
+"                            reduce camera blur (missed focus) in DNGs, kept\n"
+"                            raw; replaces each file unless -o.  Raw scans\n"
+"                            need --film (slide or negative); no scanner needed\n"
 "  research [nyquist|focus|jitter|yres|all] [--frame n] [--focus n] [-o dir]\n"
 "                            measure what multi-pass super-resolution could\n"
 "                            gain on this scanner (scans strips; -o saves DNGs)\n"
@@ -125,6 +129,8 @@ static void usage(void)
 "                            float DNG (Lightroom, macOS); 32 = 32-bit float\n"
 "                            (darktable, RawTherapee); 16 = 16-bit integer\n"
 "  --af <fast|classic>       autofocus: fast (default) or the original sequence\n"
+"  --deblur <off|low|high>   reduce camera blur (missed focus), measured per\n"
+"                            region; sharp frames are left alone\n"
 "  --flip-x / --flip-y       mirror the image\n"
 "  --rotate <90|180|270>     rotate clockwise\n");
 }
@@ -334,12 +340,36 @@ typedef struct {
     double hdr_ev;    /* > 0: HDR second pass (DNG) */
     int dng_bits;     /* float DNG sample size: 0/half = 16-bit float, 32, or 16 = integer only */
     int frames;       /* scan-all: frames 1..frames (0: every frame of the holder) */
+    int deblur;       /* DSD4_DEBLUR_OFF/LOW/HIGH: reduce camera blur */
 } scan_opts;
 
 /* frames scan-all covers: the requested count, at most the holder's */
 static int frames_to_scan(const scan_opts *o, const dsd4_holder_info *h)
 {
     return o->frames > 0 && o->frames < h->frames ? o->frames : h->frames;
+}
+
+static int parse_deblur(const char *v)
+{
+    return !strcmp(v, "off") ? DSD4_DEBLUR_OFF : !strcmp(v, "low") ? DSD4_DEBLUR_LOW
+         : !strcmp(v, "high") ? DSD4_DEBLUR_HIGH : -1;
+}
+
+static const char *deblur_name(int d) { return d == DSD4_DEBLUR_HIGH ? "high" : d == DSD4_DEBLUR_LOW ? "low" : "off"; }
+static const char *deblur_suffix(int d)
+{
+    return d == DSD4_DEBLUR_HIGH ? ", deblur high" : d == DSD4_DEBLUR_LOW ? ", deblur low" : "";
+}
+
+static void report_deblur(const char *what, const dsd4_deblur_info *di)
+{
+    if (di->applied)
+        fprintf(stderr, "%s: camera blur %.1f px, removed %.1f-%.1f px across the frame\n", what, di->sigma,
+                di->sigma_min, di->sigma_max);
+    else if (di->measured >= 3)
+        fprintf(stderr, "%s: sharp (camera blur %.1f px), unchanged\n", what, di->sigma);
+    else
+        fprintf(stderr, "%s: too few edges to measure the blur, unchanged\n", what);
 }
 
 static int parse_scan_opts(int argc, char **argv, scan_opts *o)
@@ -350,7 +380,7 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
         { "samples", 1, 0, 's' }, { "invert", 0, 0, 'i' }, { "raw", 0, 0, 'r' }, { "flip-x", 0, 0, 'X' },
         { "flip-y", 0, 0, 'Y' }, { "rotate", 1, 0, 'R' }, { "output", 1, 0, 'o' }, { "minolta", 0, 0, 'M' },
         { "format", 1, 0, 'T' }, { "hdr", 2, 0, 'H' }, { "dng-bits", 1, 0, 'B' }, { "af", 1, 0, 'A' },
-        { "frames", 1, 0, 'N' }, { 0, 0, 0, 0 },
+        { "frames", 1, 0, 'N' }, { "deblur", 1, 0, 'D' }, { 0, 0, 0, 0 },
     };
     optind = 1;
     int c;
@@ -407,6 +437,9 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
             else if (!strcmp(optarg, "classic")) o->p.af_mode = DSD4_AF_CLASSIC;
             else { fprintf(stderr, "bad autofocus mode %s (fast or classic)\n", optarg); return -1; }
             break;
+        case 'D':
+            if ((o->deblur = parse_deblur(optarg)) < 0) { fprintf(stderr, "bad deblur %s (off, low or high)\n", optarg); return -1; }
+            break;
         case 'N':
             o->frames = atoi(optarg);
             if (o->frames < 1 || o->frames > 6) { fprintf(stderr, "bad frame count %s (1-6)\n", optarg); return -1; }
@@ -458,6 +491,17 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
                 mi.exposure[1], mi.exposure[2], mi.black_level[0], mi.black_level[1], mi.black_level[2]);
     g_last_focus = im.focus;
     if (invert && !minolta) dsd4_invert_negative(&im, 1);
+    if (o->deblur && !p.preview) {
+        /* in the light the data holds: Minolta output is gamma-encoded, raw
+         * negatives are transmittance */
+        const int tone = minolta ? DSD4_TONE_GAMMA22 : negative && !invert ? DSD4_TONE_NEGATIVE : DSD4_TONE_LINEAR;
+        dsd4_deblur_info di;
+        on_progress(NULL, "deblurring", -1);
+        r = dsd4_deblur(&im, o->deblur, tone, &di);
+        done_progress();
+        if (r) { fprintf(stderr, "dsdual4: deblur failed (%d)\n", r); dsd4_image_free(&im); return 1; }
+        if (g_verbose >= 1) report_deblur("deblur", &di);
+    }
     if (o->display && minolta && im.bits == 16) {
         /* already gamma-encoded by the film curves (Nega Input): just 8 bit */
         size_t n = (size_t)im.width * im.height * im.channels;
@@ -639,6 +683,7 @@ static void scan_settings(scan_opts *c, int *neg_mode)
                                                     : "TIFF (processed)");
         if (c->dng) printf("    6  HDR           %s\n", c->hdr_ev > 0 ? "on: second pass +2 EV, merged" : "off");
         else printf("    %s6  HDR           (DNG output only)%s\n", C("2"), C("0"));
+        printf("    7  Deblur        %s\n", deblur_name(c->deblur));
         char b[64];
         if (ask("  Change which (Enter = done)? ", b, sizeof b) < 0 || !*b) return;
         switch (b[0]) {
@@ -700,6 +745,13 @@ static void scan_settings(scan_opts *c, int *neg_mode)
                    "    the passes and merges them: about 2 stops more clean shadow detail\n"
                    "    (dense slides, negative shadows). Takes twice as long.\n");
             c->hdr_ev = ask_int("    HDR: 1 = on, 0 = off", c->hdr_ev > 0, 0, 1) ? 2.0 : 0;
+            break;
+        case '7':
+            printf("    Reduces camera blur (a missed focus) in the photograph itself. The\n"
+                   "    blur is measured across each frame; sharp frames are left alone.\n"
+                   "    Film grain and colour stay as they are.\n"
+                   "    0 off   1 low - gentle, about half the blur   2 high - most of it\n");
+            c->deblur = ask_int("    Deblur", c->deblur, 0, 2);
             break;
         default:
             printf("    unknown choice\n");
@@ -826,11 +878,11 @@ static void save_settings(const menu_state *m)
     const dsd4_scan_params *p = &m->cfg->p;
     fprintf(f, "film=%d\ndpi=%d\narea=%d,%d,%d,%d\nnegatives=%d\nfocus=%d\nsamples=%d\ndisplay=%d\n"
                "flip=%d\nopen_after=%d\nprofile=%d\npreview_dpi=%d\npreview_af=%d\npreview_neg=%d\n"
-               "format=%s\nhdr=%d\naf=%s\noutdir=%s\n",
+               "format=%s\nhdr=%d\naf=%s\ndeblur=%d\noutdir=%s\n",
             (int)p->film, p->dpi, p->x, p->y, p->w, p->h, *m->neg_mode, p->focus, p->multi_sample, *m->display,
             m->cfg->fx, *m->open_after, *m->use_profile, m->pv->dpi, m->pv->autofocus, m->pv->neg,
             m->cfg->dng ? "dng" : "tiff", m->cfg->hdr_ev > 0, p->af_mode == DSD4_AF_CLASSIC ? "classic" : "fast",
-            m->outdir);
+            m->cfg->deblur, m->outdir);
     fclose(f);
 }
 
@@ -864,6 +916,7 @@ static void load_settings(menu_state *m)
         else if (!strcmp(line, "format")) m->cfg->dng = !strcmp(v, "dng");
         else if (!strcmp(line, "hdr")) m->cfg->hdr_ev = i ? 2.0 : 0;
         else if (!strcmp(line, "af")) p->af_mode = !strcmp(v, "classic") ? DSD4_AF_CLASSIC : DSD4_AF_FAST;
+        else if (!strcmp(line, "deblur") && i >= 0 && i <= 2) m->cfg->deblur = i;
         else if (!strcmp(line, "outdir") && *v) snprintf(m->outdir, m->outlen, "%s", v);
     }
     fclose(f);
@@ -913,13 +966,14 @@ static int run_menu(dsd4 *s, int fw_check)
             char area[64];
             area_text(&cfg, area, sizeof area);
             if (cfg.dng)
-                printf(" Scan       %s, %s, %d dpi, DNG %s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
+                printf(" Scan       %s, %s, %d dpi, DNG %s%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
                        !is_negative(cfg.p.film) ? "raw" : neg_mode == NEG_INVERT ? "inverted"
                        : neg_mode == NEG_MINOLTA ? "Minolta" : "raw",
-                       cfg.hdr_ev > 0 ? " + HDR" : "");
+                       cfg.hdr_ev > 0 ? " + HDR" : "", deblur_suffix(cfg.deblur));
             else
-                printf(" Scan       %s, %s, %d dpi%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
-                       is_negative(cfg.p.film) ? ", " : "", is_negative(cfg.p.film) ? neg_mode_name(neg_mode) : "");
+                printf(" Scan       %s, %s, %d dpi%s%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
+                       is_negative(cfg.p.film) ? ", " : "", is_negative(cfg.p.film) ? neg_mode_name(neg_mode) : "",
+                       deblur_suffix(cfg.deblur));
             printf(" Device     focus %s, %s, %s\n", cfg.p.focus == DSD4_FOCUS_AUTO ? "auto" : "manual",
                    display_scans ? "display-ready 8-bit" : "16-bit linear",
                    use_profile && g_icc ? "profile embedded" : "no profile");
@@ -1167,6 +1221,44 @@ static int cmd_service(int argc, char **argv)
     return 2;
 }
 
+/* deblur FILE.dng... [--level low|high] [--film ...] [-o OUT]: in place by default */
+static int cmd_deblur(int argc, char **argv)
+{
+    static const struct option lo[] = {
+        { "level", 1, 0, 'l' }, { "film", 1, 0, 'F' }, { "output", 1, 0, 'o' }, { 0, 0, 0, 0 },
+    };
+    int level = DSD4_DEBLUR_HIGH, tone = -1, c;
+    const char *out = NULL;
+    dsd4_film film;
+    optind = 1;
+    while ((c = getopt_long(argc, argv, "o:", lo, NULL)) != -1) {
+        switch (c) {
+        case 'l':
+            level = parse_deblur(optarg);
+            if (level <= 0) { fprintf(stderr, "bad deblur level %s (low or high)\n", optarg); return 2; }
+            break;
+        case 'F':
+            if (parse_film(optarg, &film)) { fprintf(stderr, "bad film type %s\n", optarg); return 2; }
+            tone = is_negative(film) ? DSD4_TONE_NEGATIVE : DSD4_TONE_LINEAR;
+            break;
+        case 'o': out = optarg; break;
+        default: usage(); return 2;
+        }
+    }
+    if (optind >= argc || (out && argc - optind > 1)) { usage(); return 2; }
+    int rc = 0;
+    for (int i = optind; i < argc; i++) {
+        dsd4_deblur_info di;
+        int r = dsd4_deblur_dng(argv[i], out ? out : argv[i], level, tone, &di);
+        if (r == DSD4_ERR_PARAM && tone < 0)
+            fprintf(stderr, "dsdual4: %s: a raw scan (or not a dsdual4 DNG); say --film slide|nega|...\n", argv[i]);
+        else if (r) fprintf(stderr, "dsdual4: %s: deblur failed (%d)\n", argv[i], r);
+        else report_deblur(argv[i], &di);
+        rc |= r != 0;
+    }
+    return rc;
+}
+
 static int cmd_convert(int argc, char **argv)
 {
     const char *in = NULL, *out = NULL;
@@ -1250,6 +1342,7 @@ int main(int argc, char **argv)
     if (!no_profile) load_profile(argv[0], profile);
 
     if (!strcmp(cmd, "convert")) return cmd_convert(cargc, cargv);
+    if (!strcmp(cmd, "deblur")) return cmd_deblur(cargc, cargv);
     if (!strcmp(cmd, "service")) return cmd_service(cargc, cargv);
     if (!strcmp(cmd, "serve") && !use_sim) return cmd_serve(NULL, fw_check, cargc, cargv);
 

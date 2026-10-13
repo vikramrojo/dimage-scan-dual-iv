@@ -415,3 +415,119 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     free_profile(&pr);
     return ok ? DSD4_OK : DSD4_ERR_IO;
 }
+
+/* ------------------------------------------------- deblur a DNG in place */
+
+static uint16_t get16le(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
+static uint32_t get32le(const uint8_t *p) { return (uint32_t)get16le(p) | (uint32_t)get16le(p + 2) << 16; }
+
+static float from_half(uint16_t h)
+{
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ff, x;
+    if (e == 0) {
+        if (!m) x = sign;
+        else { /* subnormal */
+            e = 113;
+            while (!(m & 0x400)) { m <<= 1; e--; }
+            x = sign | e << 23 | (m & 0x3ff) << 13;
+        }
+    } else if (e == 31) x = sign | 0x7f800000 | m << 13;
+    else x = sign | (e + 112) << 23 | m << 13;
+    float f;
+    memcpy(&f, &x, 4);
+    return f;
+}
+
+/* first value of a SHORT or LONG entry */
+static uint32_t ifd_val(const uint8_t *e) { return get16le(e + 2) == T_SHORT ? get16le(e + 8) : get32le(e + 8); }
+
+int dsd4_deblur_dng(const char *in, const char *out, int level, int tone, dsd4_deblur_info *info)
+{
+    if (info) memset(info, 0, sizeof *info);
+    FILE *f = fopen(in, "rb");
+    if (!f) return DSD4_ERR_IO;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *d = len > 16 ? malloc((size_t)len) : NULL;
+    if (!d || fread(d, 1, (size_t)len, f) != (size_t)len) { fclose(f); free(d); return d ? DSD4_ERR_IO : DSD4_ERR_PARAM; }
+    fclose(f);
+    int r = DSD4_ERR_PARAM;
+    dsd4_image im = { 0 };
+    /* this writer's layout: little-endian, one IFD, uncompressed strips */
+    uint32_t w = 0, h = 0, spp = 0, bps = 0, fmt = 1, comp = 1, phot = 0, nstrip = 0, so = 0, dng = 0;
+    int profiled = 0;
+    if (memcmp(d, "II*\0", 4)) goto out;
+    uint32_t ifd = get32le(d + 4);
+    if (ifd + 2 > (uint32_t)len) goto out;
+    unsigned n = get16le(d + ifd);
+    if (ifd + 2 + 12ull * n > (uint64_t)len) goto out;
+    for (unsigned i = 0; i < n; i++) {
+        const uint8_t *e = d + ifd + 2 + 12 * i;
+        uint16_t tag = get16le(e);
+        uint32_t cnt = get32le(e + 4);
+        switch (tag) {
+        case 256: w = ifd_val(e); break;
+        case 257: h = ifd_val(e); break;
+        case 258: bps = cnt <= 2 ? get16le(e + 8) : get16le(d + get32le(e + 8)); break;
+        case 259: comp = ifd_val(e); break;
+        case 262: phot = ifd_val(e); break;
+        case 273: nstrip = cnt; so = cnt == 1 ? (uint32_t)(e - d) + 8 : get32le(e + 8);
+                  if (get16le(e + 2) != T_LONG) nstrip = 0; break;
+        case 277: spp = ifd_val(e); break;
+        case 339: fmt = cnt <= 2 ? get16le(e + 8) : get16le(d + get32le(e + 8)); break;
+        case 50706: dng = 1; break;
+        case 50936: { /* ProfileName: this driver's finished positives */
+            uint32_t off = cnt <= 4 ? (uint32_t)(e - d) + 8 : get32le(e + 8);
+            if (off + cnt <= (uint32_t)len)
+                profiled = memmem(d + off, cnt, "dsdual4 Minolta", 15) || memmem(d + off, cnt, "dsdual4 inverted", 16);
+            break;
+        }
+        }
+    }
+    if (!dng || comp != 1 || phot != 34892 || !w || !h || (spp != 1 && spp != 3) || !nstrip ||
+        so + 4ull * nstrip > (uint64_t)len || !((fmt == 1 && bps == 16) || (fmt == 3 && (bps == 16 || bps == 32))))
+        goto out;
+    if (tone < 0) {
+        if (!profiled) goto out; /* raw scan: the caller has to say positive or negative */
+        tone = DSD4_TONE_LINEAR;
+    }
+    /* strips are contiguous in this writer: one run of samples */
+    const uint32_t data = get32le(d + so), bytes = bps / 8;
+    const uint64_t total = (uint64_t)w * h * spp * bytes;
+    if (data + total > (uint64_t)len) goto out;
+    im.width = (int)w;
+    im.height = (int)h;
+    im.channels = (int)spp;
+    im.bits = fmt == 1 ? 16 : 32;
+    im.stride = (size_t)w * spp * (im.bits / 8);
+    im.data = malloc(im.stride * h);
+    r = DSD4_ERR_NOMEM;
+    if (!im.data) goto out;
+    const size_t ns = (size_t)w * h * spp;
+    uint8_t *p = d + data;
+    for (size_t i = 0; i < ns; i++) {
+        if (im.bits == 16) ((uint16_t *)im.data)[i] = get16le(p + 2 * i);
+        else if (bps == 16) ((float *)im.data)[i] = from_half(get16le(p + 2 * i));
+        else { uint32_t u = get32le(p + 4 * i); memcpy((float *)im.data + i, &u, 4); }
+    }
+    if ((r = dsd4_deblur(&im, level, tone, info))) goto out;
+    for (size_t i = 0; i < ns; i++) {
+        if (im.bits == 16) put16(p + 2 * i, ((uint16_t *)im.data)[i]);
+        else if (bps == 16) put16(p + 2 * i, to_half(((float *)im.data)[i]));
+        else { uint32_t u; memcpy(&u, (float *)im.data + i, 4); put32(p + 4 * i, u); }
+    }
+    /* write beside the target, then replace it: never a half-written file */
+    char tmp[4096];
+    snprintf(tmp, sizeof tmp, "%s.deblur-tmp", out);
+    r = DSD4_ERR_IO;
+    if (!(f = fopen(tmp, "wb"))) goto out;
+    int ok = fwrite(d, 1, (size_t)len, f) == (size_t)len;
+    ok = !fclose(f) && ok;
+    if (!ok || rename(tmp, out)) { remove(tmp); goto out; }
+    r = DSD4_OK;
+out:
+    free(im.data);
+    free(d);
+    return r;
+}

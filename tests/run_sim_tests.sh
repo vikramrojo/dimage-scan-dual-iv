@@ -201,6 +201,20 @@ echo "     Minolta HDR DNG vs single pass: rms $mc (noiseless); green noise $mn 
 check minolta-hdr-matches gt 0.002 "$mc"
 check minolta-hdr-less-noise gt "$(awk -v a="$mn" 'BEGIN{print a*0.85}')" "$mh"
 
+# --- deblur: measured blur, sharpening, sharp pictures untouched (synthetic film)
+if clang -O2 -Iinclude tests/deblur_test.c build/libdsdual4.a -framework IOKit -framework CoreFoundation \
+       -framework ApplicationServices -framework ImageIO -framework Accelerate -o "$OUT/deblur_test" 2>"$OUT/dt.log"; then
+    dres=$("$OUT/deblur_test" "$OUT"); echo "$dres"
+    pass=$((pass + $(grep -c '^ok' <<< "$dres"))); failn=$((failn + $(grep -c '^FAIL' <<< "$dres")))
+else echo "FAIL deblur_test (build)"; failn=$((failn+1)); fi
+# the command: in place on a Minolta DNG (positive, from its profile name)
+cp "$OUT/mdng-nega.dng" "$OUT/deblur.dng"
+check deblur-command-in-place "$BIN" deblur "$OUT/deblur.dng" --level low
+if "$BIN" deblur "$OUT/dng-raw.dng" -o "$OUT/x.dng" >/dev/null 2>&1; then
+    echo "FAIL deblur-raw-needs-film accepted"; failn=$((failn+1)); else echo "ok   deblur-raw-needs-film"; pass=$((pass+1)); fi
+check deblur-raw-with-film "$BIN" deblur "$OUT/dng-raw.dng" --film slide -o "$OUT/deblur-raw.dng"
+DSD4_SIM_FILM=nega run scan-deblur 390x585 scan --film nega --minolta --dpi 400 --focus 37 --deblur high -o "$OUT/scan-deblur.tiff"
+
 # --- super-resolution research: the measurements recover the simulated optics
 export DSD4_SIM_CHART=star
 DSD4_SIM_NOISE=0.01 run research-nyquist - research nyquist --focus 37

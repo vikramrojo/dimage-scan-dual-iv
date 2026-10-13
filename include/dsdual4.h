@@ -183,6 +183,28 @@ int  dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *p, double ev, dsd4_image *im
 int  dsd4_scan_minolta_hdr(dsd4 *s, const dsd4_scan_params *p, double ev, dsd4_image *img,
                            dsd4_minolta_info *info, dsd4_hdr_info *hdr, dsd4_progress_fn cb, void *ud);
 
+/* Deblur: reduces camera blur (missed focus) in the photograph, measured per
+ * region; frames that are sharp are left alone.  Brightness only, film
+ * grain and dust kept as they are.  tone: how the samples encode light. */
+#define DSD4_DEBLUR_OFF  0
+#define DSD4_DEBLUR_LOW  1      /* 60 % of the measured blur removed */
+#define DSD4_DEBLUR_HIGH 2      /* 90 % */
+#define DSD4_TONE_LINEAR   0    /* positive, linear light */
+#define DSD4_TONE_GAMMA22  1    /* positive, gamma-encoded (Minolta TIFFs) */
+#define DSD4_TONE_NEGATIVE 2    /* negative, linear transmittance */
+typedef struct {
+    double sigma;             /* typical camera blur found, sigma in pixels */
+    double sigma_min, sigma_max; /* range removed across the frame */
+    int tiles, measured;      /* regions, and those with edges to measure */
+    int applied;              /* 0: sharp enough (or nothing measurable), unchanged */
+} dsd4_deblur_info;
+int  dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info);
+/* Deblur a DNG written by dsd4_write_dng, keeping it raw: only the samples
+ * change, every tag stays.  out may equal in (replaced safely).  tone -1:
+ * from the file (finished positives); raw scans need DSD4_TONE_LINEAR
+ * (slides) or DSD4_TONE_NEGATIVE. */
+int  dsd4_deblur_dng(const char *in, const char *out, int level, int tone, dsd4_deblur_info *info);
+
 /* Linear DNG ("raw") output for raw converters (Lightroom, darktable, Negative
  * Lab Pro).  16-bit images are written as integers.  Float images: float_bits
  * 16 (half float, what Lightroom's HDR DNGs use and macOS decodes), 32 (full
