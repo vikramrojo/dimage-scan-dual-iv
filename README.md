@@ -107,21 +107,40 @@ make uninstall-agent
 `--local` advertises the scanner only on this Mac. Without it, other Macs and
 iPads on the network can use it too.
 
-## Images
+## Images and colour
 
 Scans are the scanner's linear 16-bit data after the original driver's
-shading correction, exposure model and digital gain. The image is not
-gamma-encoded or colour-managed, just like the original's "raw/linear" output,
-so expect a dark-looking image in viewers. Apply a curve in your editor, or use
-8-bit output for a quick look. `--invert` does a simple per-channel inversion
-of negatives (orange-mask removal by auto levels). The original software's
-image processing (Pixel Polish, Auto Dust Brush, Grain Dissolver, colour
-matching) is not included. The Dual IV has no infrared channel, so there is
-no ICE.
+shading correction, exposure model and digital gain. The scanner records
+**device RGB**. Konica Minolta characterised it with three ICC profiles that
+ship with the original software (`DS Dual4/Profile/`):
+
+| profile | curve | use |
+|---|---|---|
+| `MLTF3200p.icc` "Posi Linear" | linear | linear slide scans (what dsdual4 produces) |
+| `MLTF3200.icc` | gamma ≈ 2.1 | gamma-encoded slide output of the original |
+| `MLTF3200n.icc` "Nega Input" | gamma ≈ 2.6 | negatives after the original's own inversion |
+
+dsdual4 **embeds `MLTF3200p.icc` in colour slide scans** (16-bit, or 8-bit
+linear), so Photoshop, Affinity, darktable, Preview etc. interpret the colours
+correctly and you can convert to your working space. The profile is read from
+your copy of the original software, `--profile`, `$DSD4_PROFILE` or the
+install prefix (`make install PROFILE=…`); `--no-profile` turns it off. Its
+gamut is wider than sRGB. Negatives, B&W and the display-ready 8-bit
+previews are not tagged with it, because the profile does not describe them.
+
+The AirScan bridge colour-manages slides through the same profile and
+delivers sRGB JPEG/PDF (or profile-tagged PNG/TIFF) to Image Capture and
+Preview. Other film types are made display-ready.
+
+Negatives: the scanner never inverts. The original software inverted on the
+Mac with film-specific curves. `--invert` (and the menu, automatically) does
+a simple per-channel inversion. For best colour, keep the raw 16-bit negative
+and use a dedicated tool (Negative Lab Pro, darktable negadoctor, ColorPerfect).
+The original software's image processing (Pixel Polish, Auto Dust Brush,
+Grain Dissolver) is not included. The Dual IV has no infrared channel, so no ICE.
 
 Orientation: lines are delivered in the scanner's order. If your scans come
-out mirrored, use `--flip-x` (the right default depends on how the film is
-loaded and has not been checked on hardware).
+out mirrored, use `--flip-x`.
 
 ## Verification
 

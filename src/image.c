@@ -4,6 +4,7 @@
  */
 #include "dsd4_internal.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,10 +22,16 @@ static void entry(FILE *f, uint16_t tag, uint16_t type, uint32_t count, uint32_t
 
 int dsd4_write_tiff(const dsd4_image *img, const char *path)
 {
+    return dsd4_write_tiff_icc(img, path, NULL, 0);
+}
+
+int dsd4_write_tiff_icc(const dsd4_image *img, const char *path, const void *icc, size_t icc_len)
+{
+    if (!icc) icc_len = 0;
     FILE *f = fopen(path, "wb");
     if (!f) return DSD4_ERR_IO;
     const uint32_t bytes = (uint32_t)(img->stride * img->height);
-    const uint16_t nent = 14;
+    const uint16_t nent = icc_len ? 15 : 14;
     const uint32_t ifd = 8;
     const uint32_t extra = ifd + 2 + nent * 12 + 4;   /* after the IFD */
     const uint32_t bps_off = extra;                    /* 3 x SHORT */
@@ -32,7 +39,8 @@ int dsd4_write_tiff(const dsd4_image *img, const char *path)
     const uint32_t yres_off = xres_off + 8;
     const uint32_t sw_off = yres_off + 8;
     static const char sw[] = "dsdual4 (DiMAGE Scan Dual IV driver)";
-    const uint32_t data_off = (sw_off + (uint32_t)sizeof sw + 15) & ~15u;
+    const uint32_t icc_off = (sw_off + (uint32_t)sizeof sw + 3) & ~3u;
+    const uint32_t data_off = (icc_off + (uint32_t)icc_len + 15) & ~15u;
 
     fputs("II", f);
     w16(f, 42);
@@ -53,12 +61,17 @@ int dsd4_write_tiff(const dsd4_image *img, const char *path)
     entry(f, 283, 5, 1, yres_off);
     entry(f, 296, 3, 1, 2);                                 /* inch */
     entry(f, 305, 2, (uint32_t)sizeof sw, sw_off);
+    if (icc_len) entry(f, 34675, 7, (uint32_t)icc_len, icc_off); /* InterColorProfile */
     w32(f, 0);
     for (int i = 0; i < 3; i++) w16(f, (uint16_t)img->bits);
     w16(f, 0);
     w32(f, (uint32_t)img->dpi); w32(f, 1);
     w32(f, (uint32_t)img->dpi); w32(f, 1);
     fwrite(sw, 1, sizeof sw, f);
+    if (icc_len) {
+        while ((uint32_t)ftell(f) < icc_off) fputc(0, f);
+        fwrite(icc, 1, icc_len, f);
+    }
     while ((uint32_t)ftell(f) < data_off) fputc(0, f);
     if (img->bits == 16) {
         /* TIFF "II" means little-endian samples */
@@ -78,6 +91,33 @@ int dsd4_write_tiff(const dsd4_image *img, const char *path)
     int ok = !ferror(f);
     fclose(f);
     return ok ? DSD4_OK : DSD4_ERR_IO;
+}
+
+void dsd4_to_display(dsd4_image *im)
+{
+    if (im->bits != 16) return;
+    const size_t n = (size_t)im->width * im->height * im->channels;
+    uint16_t *p = (uint16_t *)im->data;
+    uint32_t *hist = calloc(65536, sizeof *hist);
+    uint8_t *lut = malloc(65536);
+    if (!hist || !lut) { free(hist); free(lut); return; }
+    for (size_t i = 0; i < n; i++) hist[p[i]]++;
+    size_t tail = n / 1000, acc = 0;
+    int lo = 0, hi = 65535;
+    while (lo < 65535 && acc + hist[lo] <= tail) acc += hist[lo++];
+    acc = 0;
+    while (hi > lo && acc + hist[hi] <= tail) acc += hist[hi--];
+    if (hi - lo < 256) { lo = 0; hi = 65535; }
+    for (int v = 0; v < 65536; v++) {
+        double x = (double)(v - lo) / (hi - lo);
+        x = x < 0 ? 0 : x > 1 ? 1 : x;
+        lut[v] = (uint8_t)(pow(x, 1 / 2.2) * 255 + 0.5);
+    }
+    for (size_t i = 0; i < n; i++) im->data[i] = lut[p[i]];
+    free(hist);
+    free(lut);
+    im->bits = 8;
+    im->stride = (size_t)im->width * im->channels;
 }
 
 /* Invert a colour negative: per-channel black/white points from the 0.1 % and

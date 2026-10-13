@@ -65,6 +65,8 @@ typedef struct {
     char status[256];
     int busy;
     dsd4_escl_log_fn log;
+    const void *icc;
+    size_t icc_len;
 } server_t;
 
 static server_t g;
@@ -143,29 +145,55 @@ static int xml_get(const char *xml, const char *tag, char *out, size_t n)
 
 /* ------------------------------------------------------------ encoding */
 
-static uint8_t *encode(const dsd4_image *im, const char *fmt, size_t *len)
+/* Encode for the client.  'icc' set: the image is linear 16-bit scanner RGB
+ * described by the scanner profile; it is tagged with it (PNG/TIFF) or
+ * converted to sRGB by ColorSync (JPEG/PDF).  Otherwise the image is already
+ * display-ready 8-bit sRGB / gray. */
+static uint8_t *encode(const dsd4_image *im, const char *fmt, const void *icc, size_t icc_len, int want16, size_t *len)
 {
     const int ch = im->channels;
-    CGColorSpaceRef cs = ch == 3 ? CGColorSpaceCreateWithName(kCGColorSpaceSRGB)
-                                 : CGColorSpaceCreateWithName(kCGColorSpaceGenericGrayGamma2_2);
-    int jpeg = !strcmp(fmt, "image/jpeg"), pdf = !strcmp(fmt, "application/pdf");
-    int bits = (jpeg || pdf) ? 8 : im->bits;
-    size_t stride = (size_t)im->width * ch * (bits / 8);
+    const int jpeg = !strcmp(fmt, "image/jpeg"), pdf = !strcmp(fmt, "application/pdf");
+    CGColorSpaceRef cs = NULL;
+    if (icc && ch == 3) {
+        CFDataRef d = CFDataCreate(NULL, icc, (CFIndex)icc_len);
+        cs = CGColorSpaceCreateWithICCData(d);
+        CFRelease(d);
+    }
+    if (!cs) {
+        icc = NULL;
+        cs = ch == 3 ? CGColorSpaceCreateWithName(kCGColorSpaceSRGB)
+                     : CGColorSpaceCreateWithName(kCGColorSpaceGenericGrayGamma2_2);
+    }
+    const int bits = im->bits;
+    const size_t stride = (size_t)im->width * ch * (bits / 8);
     uint8_t *px = malloc(stride * im->height);
     if (!px) { CGColorSpaceRelease(cs); return NULL; }
-    size_t n = (size_t)im->width * im->height * ch;
-    if (bits == 8 && im->bits == 16) {
-        for (size_t i = 0; i < n; i++) px[i] = (uint8_t)(((uint16_t *)im->data)[i] >> 8);
-    } else if (bits == 16) {
-        /* CoreGraphics wants big-endian 16-bit unless told otherwise */
+    const size_t n = (size_t)im->width * im->height * ch;
+    if (bits == 16) /* CoreGraphics wants big-endian 16-bit unless told otherwise */
         for (size_t i = 0; i < n; i++) put_be16(px + 2 * i, ((uint16_t *)im->data)[i]);
-    } else {
+    else
         memcpy(px, im->data, n);
-    }
     CGDataProviderRef dp = CGDataProviderCreateWithData(NULL, px, stride * im->height, NULL);
     CGImageRef img = CGImageCreate((size_t)im->width, (size_t)im->height, (size_t)bits, (size_t)(bits * ch), stride,
                                    cs, kCGImageAlphaNone | (bits == 16 ? kCGBitmapByteOrder16Big : 0), dp, NULL,
-                                   false, kCGRenderingIntentDefault);
+                                   false, kCGRenderingIntentPerceptual);
+    CGDataProviderRelease(dp);
+    CGColorSpaceRelease(cs);
+    if (!img) { free(px); return NULL; }
+    if (icc && (jpeg || pdf || bits == 8 || !want16)) {
+        /* colour-convert the scanner RGB into an 8-bit sRGB image */
+        CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        CGContextRef bc = CGBitmapContextCreate(NULL, (size_t)im->width, (size_t)im->height, 8, 0, srgb,
+                                                kCGImageAlphaNoneSkipLast);
+        CGColorSpaceRelease(srgb);
+        if (bc) {
+            CGContextSetRenderingIntent(bc, kCGRenderingIntentPerceptual);
+            CGContextDrawImage(bc, CGRectMake(0, 0, im->width, im->height), img);
+            CGImageRef conv = CGBitmapContextCreateImage(bc);
+            CGContextRelease(bc);
+            if (conv) { CGImageRelease(img); img = conv; }
+        }
+    }
     CFMutableDataRef out = CFDataCreateMutable(NULL, 0);
     if (pdf) {
         double w = im->width * 72.0 / im->dpi, h = im->height * 72.0 / im->dpi;
@@ -183,8 +211,6 @@ static uint8_t *encode(const dsd4_image *im, const char *fmt, size_t *len)
         CGImageDestinationRef d = CGImageDestinationCreateWithData(out, uti, 1, NULL);
         if (!d) {
             CGImageRelease(img);
-            CGDataProviderRelease(dp);
-            CGColorSpaceRelease(cs);
             free(px);
             CFRelease(out);
             return NULL;
@@ -195,7 +221,7 @@ static uint8_t *encode(const dsd4_image *im, const char *fmt, size_t *len)
         const void *k[] = { kCGImagePropertyDPIWidth, kCGImagePropertyDPIHeight, kCGImageDestinationLossyCompressionQuality };
         const void *v[] = { ndpi, ndpi, nq };
         CFDictionaryRef props = CFDictionaryCreate(NULL, k, v, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CGImageDestinationAddImage(d, img, props);
+        CGImageDestinationAddImage(d, img, props); /* embeds the image's colour space */
         CGImageDestinationFinalize(d);
         CFRelease(props);
         CFRelease(ndpi);
@@ -203,8 +229,6 @@ static uint8_t *encode(const dsd4_image *im, const char *fmt, size_t *len)
         CFRelease(d);
     }
     CGImageRelease(img);
-    CGDataProviderRelease(dp);
-    CGColorSpaceRelease(cs);
     free(px);
     *len = (size_t)CFDataGetLength(out);
     uint8_t *res = malloc(*len ? *len : 1);
@@ -252,15 +276,13 @@ static void *job_thread(void *arg)
             im.channels = 1;
             im.stride = (size_t)im.width * 2;
         }
-        if (g.invert && (j->p.film == DSD4_FILM_NEGATIVE_COLOR || j->p.film == DSD4_FILM_NEGATIVE_BW))
-            dsd4_invert_negative(&im, 1);
-        if (!j->bits16 && im.bits == 16) {
-            size_t n = (size_t)im.width * im.height * im.channels;
-            for (size_t i = 0; i < n; i++) im.data[i] = (uint8_t)(((uint16_t *)im.data)[i] >> 8);
-            im.bits = 8;
-            im.stride = (size_t)im.width * im.channels;
-        }
-        doc = encode(&im, j->format, &len);
+        int negative = j->p.film == DSD4_FILM_NEGATIVE_COLOR || j->p.film == DSD4_FILM_NEGATIVE_BW;
+        if (g.invert && negative) dsd4_invert_negative(&im, 1);
+        /* linear colour slides keep their data and get the scanner profile;
+         * everything else is made display-ready here */
+        const int use_icc = g.icc && !negative && im.channels == 3 && j->p.film == DSD4_FILM_POSITIVE_COLOR;
+        if (!use_icc) dsd4_to_display(&im);
+        doc = encode(&im, j->format, use_icc ? g.icc : NULL, g.icc_len, j->bits16, &len);
         logmsg("scan job %s: %dx%d %d dpi -> %s, %zu bytes", j->id, im.width, im.height, im.dpi, j->format, len);
         dsd4_image_free(&im);
     } else {
@@ -732,6 +754,8 @@ int dsd4_escl_serve(dsd4 *s, const dsd4_escl_options *o)
     g.s = s;
     g.port = o->port ? o->port : 8090;
     g.log = o->log;
+    g.icc = o->icc;
+    g.icc_len = o->icc_len;
     snprintf(g.name, sizeof g.name, "%s", o->name ? o->name : "DiMAGE Scan Dual IV");
     gethostname(g.host, sizeof g.host);
     if (!strchr(g.host, '.')) strncat(g.host, ".local", sizeof g.host - strlen(g.host) - 1);

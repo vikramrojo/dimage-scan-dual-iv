@@ -132,6 +132,10 @@ void dsd4_image_free(dsd4_image *img);
 /* simple post-processing helpers for raw scans */
 void dsd4_invert_negative(dsd4_image *img, int auto_levels);
 int  dsd4_write_tiff(const dsd4_image *img, const char *path);
+/* same, embedding an ICC profile (TIFF tag 34675) when icc != NULL */
+int  dsd4_write_tiff_icc(const dsd4_image *img, const char *path, const void *icc, size_t icc_len);
+/* linear 16-bit -> 8-bit for viewing: 0.1 %/99.9 % stretch and gamma 2.2 */
+void dsd4_to_display(dsd4_image *img);
 
 #ifdef __cplusplus
 }

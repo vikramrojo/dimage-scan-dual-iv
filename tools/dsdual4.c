@@ -16,6 +16,9 @@
 #include <time.h>
 
 static int g_verbose = 1;
+static uint8_t *g_icc;      /* scanner input profile (MLTF3200p.icc, "Posi Linear") */
+static size_t g_icc_len;
+static char g_icc_path[PATH_MAX];
 static int g_progress_tty;
 
 static void usage(void)
@@ -45,6 +48,10 @@ static void usage(void)
 "global options:\n"
 "  --sim                     use the built-in protocol simulator instead of USB\n"
 "  --firmware <file>         DS_Dual4.BIN used for the firmware check\n"
+"  --profile <file.icc>      scanner input profile to embed in linear colour\n"
+"                            slide scans (default: MLTF3200p.icc, found next to\n"
+"                            the original software or in the install prefix)\n"
+"  --no-profile              do not embed a profile\n"
 "  --firmware-update         allow sending DS_Dual4.BIN if the scanner asks\n"
 "                            for it (off by default; never needed to scan)\n"
 "  -v / -q                   more / less output (repeat -v for protocol traces)\n"
@@ -110,6 +117,54 @@ static const char *find_firmware(const char *argv0)
         if (access(buf, R_OK) == 0) return buf;
     }
     return NULL;
+}
+
+/* Konica Minolta's input profile for linear positive scans, read from the
+ * user's copy of the original software (not distributed with dsdual4). */
+static void load_profile(const char *argv0, const char *explicit_path)
+{
+    char buf[PATH_MAX];
+    const char *cands[8];
+    int n = 0;
+    if (explicit_path) cands[n++] = explicit_path;
+    else {
+        const char *env = getenv("DSD4_PROFILE");
+        if (env) cands[n++] = env;
+        cands[n++] = "MLTF3200p.icc";
+        cands[n++] = "../DS_Dual4_extracted/DS Dual4/Profile/MLTF3200p.icc";
+        cands[n++] = "/usr/local/share/dsdual4/MLTF3200p.icc";
+        cands[n++] = "/opt/homebrew/share/dsdual4/MLTF3200p.icc";
+        const char *slash = strrchr(argv0, '/');
+        if (slash) {
+            snprintf(buf, sizeof buf, "%.*s/../share/dsdual4/MLTF3200p.icc", (int)(slash - argv0), argv0);
+            cands[n++] = buf;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        FILE *f = fopen(cands[i], "rb");
+        if (!f) continue;
+        uint8_t hdr[132];
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (len < 132 || len > (1 << 20) || fread(hdr, 1, 132, f) != 132 || memcmp(hdr + 36, "acsp", 4)) {
+            fclose(f);
+            if (explicit_path) fprintf(stderr, "dsdual4: %s is not an ICC profile\n", cands[i]);
+            continue;
+        }
+        g_icc = malloc((size_t)len);
+        fseek(f, 0, SEEK_SET);
+        if (g_icc && fread(g_icc, 1, (size_t)len, f) == (size_t)len) {
+            g_icc_len = (size_t)len;
+            snprintf(g_icc_path, sizeof g_icc_path, "%s", cands[i]);
+        } else {
+            free(g_icc);
+            g_icc = NULL;
+        }
+        fclose(f);
+        if (g_icc) return;
+    }
+    if (explicit_path) fprintf(stderr, "dsdual4: cannot read profile %s\n", explicit_path);
 }
 
 static int parse_film(const char *s, dsd4_film *f)
@@ -188,33 +243,6 @@ static int rotate90(dsd4_image *im)
     return 0;
 }
 
-/* linear 16-bit -> 8-bit with gamma 2.2 and a 0.1 %/99.9 % stretch per image,
- * so the file looks right in Preview */
-static void to_display(dsd4_image *im)
-{
-    size_t n = (size_t)im->width * im->height * im->channels;
-    if (im->bits != 16) return;
-    uint16_t *p = (uint16_t *)im->data;
-    static uint32_t hist[65536];
-    memset(hist, 0, sizeof hist);
-    for (size_t i = 0; i < n; i++) hist[p[i]]++;
-    size_t tail = n / 1000, acc = 0;
-    int lo = 0, hi = 65535;
-    while (lo < 65535 && acc + hist[lo] <= tail) acc += hist[lo++];
-    acc = 0;
-    while (hi > lo && acc + hist[hi] <= tail) acc += hist[hi--];
-    if (hi - lo < 256) { lo = 0; hi = 65535; }
-    uint8_t lut[65536];
-    for (int v = 0; v < 65536; v++) {
-        double x = (double)(v - lo) / (hi - lo);
-        x = x < 0 ? 0 : x > 1 ? 1 : x;
-        lut[v] = (uint8_t)(pow(x, 1 / 2.2) * 255 + 0.5);
-    }
-    for (size_t i = 0; i < n; i++) im->data[i] = lut[p[i]];
-    im->bits = 8;
-    im->stride = (size_t)im->width * im->channels;
-}
-
 typedef struct {
     dsd4_scan_params p;
     const char *out;
@@ -288,7 +316,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     done_progress();
     if (check(r, s, p.preview ? "preview" : "scan")) return 1;
     if (o->invert) dsd4_invert_negative(&im, 1);
-    if (o->display) to_display(&im);
+    if (o->display) dsd4_to_display(&im);
     if (o->fx) flip_x(&im);
     if (o->fy) flip_y(&im);
     if (o->rot == 90 || o->rot == 180 || o->rot == 270) {
@@ -298,16 +326,19 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
             if (o->rot == 270) { flip_x(&im); flip_y(&im); }
         }
     }
-    r = dsd4_write_tiff(&im, path);
+    /* the scanner profile describes linear colour positives only */
+    int embed = g_icc && !o->display && !o->invert && im.channels == 3 && p.film == DSD4_FILM_POSITIVE_COLOR;
+    r = dsd4_write_tiff_icc(&im, path, embed ? g_icc : NULL, embed ? g_icc_len : 0);
     if (r != DSD4_OK) {
         fprintf(stderr, "dsdual4: cannot write %s\n", path);
         dsd4_image_free(&im);
         return 1;
     }
     if (g_verbose >= 1)
-        fprintf(stderr, "wrote %s: %dx%d, %d-bit %s, %d dpi, focus %d, digital gain %.2f/%.2f/%.2f\n",
+        fprintf(stderr, "wrote %s: %dx%d, %d-bit %s, %d dpi, focus %d, digital gain %.2f/%.2f/%.2f%s\n",
                 path, im.width, im.height, im.bits, im.channels == 3 ? "RGB" : "gray", im.dpi, im.focus,
-                im.digital_gain[0], im.digital_gain[1], im.digital_gain[2]);
+                im.digital_gain[0], im.digital_gain[1], im.digital_gain[2],
+                embed ? ", scanner profile embedded" : "");
     dsd4_image_free(&im);
     return 0;
 }
@@ -420,6 +451,7 @@ static int run_menu(dsd4 *s, int fw_check)
                display_scans ? "display-ready 8-bit" : "16-bit linear",
                cfg.p.focus == DSD4_FOCUS_AUTO ? "auto" : "manual");
         printf(" Output     %s\n", outdir);
+        printf(" Profile    %s\n", g_icc ? "MLTF3200p.icc embedded in 16-bit slide scans" : "none found (colours not tagged)");
         printf("%s──────────────────────────────────────────────────────%s\n", C("2"), C("0"));
 
         /* scanning is never blocked up front: the action initialises if needed
@@ -589,7 +621,8 @@ static int run_menu(dsd4 *s, int fw_check)
 
 int main(int argc, char **argv)
 {
-    int use_sim = 0, fw_check = 0;
+    int use_sim = 0, fw_check = 0, no_profile = 0;
+    const char *profile = NULL;
     const char *fw = NULL;
     int i = 1;
     for (; i < argc && argv[i][0] == '-'; i++) {
@@ -597,6 +630,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-firmware-check")) fw_check = 0;
         else if (!strcmp(argv[i], "--firmware-update")) fw_check = 1;
         else if (!strcmp(argv[i], "--firmware") && i + 1 < argc) fw = argv[++i];
+        else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
+        else if (!strcmp(argv[i], "--no-profile")) no_profile = 1;
         else if (!strncmp(argv[i], "-v", 2)) g_verbose += (int)strlen(argv[i]) - 1;
         else if (!strcmp(argv[i], "-q")) g_verbose = 0;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(); return 0; }
@@ -608,6 +643,7 @@ int main(int argc, char **argv)
     char **cargv = argv + i;
     g_progress_tty = isatty(2);
     if (!fw) fw = find_firmware(argv[0]);
+    if (!no_profile) load_profile(argv[0], profile);
 
     char err[256] = "";
     dsd4 *s = NULL;
@@ -714,7 +750,7 @@ int main(int argc, char **argv)
             }
         }
     } else if (!strcmp(cmd, "serve")) {
-        dsd4_escl_options eo = { .port = 8090, .film = DSD4_FILM_POSITIVE_COLOR };
+        dsd4_escl_options eo = { .port = 8090, .film = DSD4_FILM_POSITIVE_COLOR, .icc = g_icc, .icc_len = g_icc_len };
         for (int k = 1; k < cargc; k++) {
             if (!strcmp(cargv[k], "--port") && k + 1 < cargc) eo.port = atoi(cargv[++k]);
             else if (!strcmp(cargv[k], "--name") && k + 1 < cargc) eo.name = cargv[++k];

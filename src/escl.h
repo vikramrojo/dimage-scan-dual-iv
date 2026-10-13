@@ -12,6 +12,8 @@ typedef struct {
     dsd4_film film;         /* initial film type */
     int localhost_only;     /* bind to loopback and advertise on this Mac only */
     dsd4_escl_log_fn log;
+    const void *icc;        /* scanner input profile for linear positives */
+    size_t icc_len;
 } dsd4_escl_options;
 
 /* Runs forever (until the process is terminated). */

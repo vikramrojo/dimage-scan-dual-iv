@@ -30,7 +30,8 @@ test: build/dsdual4
 difftest:
 	./tests/run_diff.sh
 
-# FIRMWARE=path/to/DS_Dual4.BIN installs the firmware image used for the
+# PROFILE=path/to/MLTF3200p.icc installs the scanner's input profile (embedded
+# in linear slide scans). FIRMWARE=path/to/DS_Dual4.BIN installs the firmware image used for the
 # (scanner-requested) firmware check next to the binary.
 install: all
 	install -d $(PREFIX)/bin $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/share/dsdual4
@@ -38,6 +39,7 @@ install: all
 	install -m 644 build/libdsdual4.a $(PREFIX)/lib/
 	install -m 644 include/dsdual4.h $(PREFIX)/include/
 	if [ -n "$(FIRMWARE)" ]; then install -m 644 "$(FIRMWARE)" $(PREFIX)/share/dsdual4/DS_Dual4.BIN; fi
+	if [ -n "$(PROFILE)" ]; then install -m 644 "$(PROFILE)" $(PREFIX)/share/dsdual4/MLTF3200p.icc; fi
 
 # Run the AirScan bridge in the background at login (scanner appears in
 # Image Capture / Preview whenever it is connected).
@@ -58,7 +60,7 @@ PKGROOT  = build/pkgroot
 # copy of DS_Dual4.BIN under /usr/local/share/dsdual4.
 pkg: all
 	rm -rf $(PKGROOT)
-	$(MAKE) install PREFIX=$(CURDIR)/$(PKGROOT)/usr/local FIRMWARE="$(FIRMWARE)"
+	$(MAKE) install PREFIX=$(CURDIR)/$(PKGROOT)/usr/local FIRMWARE="$(FIRMWARE)" PROFILE="$(PROFILE)"
 	install -m 644 packaging/org.dsdual4.airscan.plist $(PKGROOT)/usr/local/share/dsdual4/
 	cat README.md > $(PKGROOT)/usr/local/share/dsdual4/README.md
 	cat docs/PROTOCOL.md > $(PKGROOT)/usr/local/share/dsdual4/PROTOCOL.md
