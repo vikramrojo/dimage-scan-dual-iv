@@ -129,9 +129,10 @@ static int check(int r, dsd4 *s, const char *what)
     int code = dsd4_last_error(s);
     if (r == DSD4_ERR_SCANNER && (code == 0x67 || code == 0x68 || code == 0x69 || code == 0xd1)) {
         fprintf(stderr, "dsdual4: %s: the scanner reports a film holder problem (code 0x%02x: %s).\n"
-                "  The holder may be half inserted or still moving. Either push it in until the\n"
-                "  scanner grabs it, or pull it out completely, wait a few seconds and retry.\n"
-                "  'dsdual4 reset' resets the scanner; if that fails, switch it off and on.\n",
+                "  Check that the front door is closed and no holder is half inserted (push it\n"
+                "  in until the scanner grabs it, or pull it out completely), then retry.\n"
+                "  If it persists, switch the scanner off and on, wait for the light to stop\n"
+                "  blinking, and run init again ('dsdual4 reset' may also help).\n",
                 what, code, dsd4_scanner_error_text(code));
         return 1;
     }
@@ -349,7 +350,9 @@ static void menu_help(void)
 "     calibrates (best with no holder inserted). This takes 15 s to 2 minutes.\n"
 "  3. Load film into the FH-U1 strip holder (or slides into the SH-U1 holder),\n"
 "     open the front door and push the holder in, arrow first, until the\n"
-"     scanner grabs it. Choose \"Refresh\" to see it detected.\n"
+"     scanner grabs it, then close the door. Choose \"Refresh\" to see it.\n"
+"     A \"holder position\" error usually means the door is open or a holder is\n"
+"     half inserted; if it persists, switch the scanner off and on.\n"
 "  4. Pick the film type in Settings (slide, colour negative, B&W).\n"
 "  5. \"Preview\" makes a quick 800 dpi view of one frame and opens it in\n"
 "     Preview. \"Scan\" makes the full-resolution file.\n"
