@@ -6,6 +6,9 @@
   imgcheck.py noise CLEAN NOISY [dark]   rms difference (green), optionally only
                                          where CLEAN < dark
   imgcheck.py dng IN.dng                 DNG structure summary
+  imgcheck.py inner IN.tiff MARGIN       mean (green) inside a MARGIN-pixel border
+  imgcheck.py mean IN.bmp                mean level of a 24-bit BMP (0..1), e.g. a
+                                         DNG as decoded by macOS (sips -s format bmp)
 """
 import array
 import struct
@@ -44,6 +47,17 @@ def read(path):
     return tags, w, h, spp, v
 
 
+def bmp_mean(path):
+    d = open(path, 'rb').read()
+    assert d[:2] == b'BM', 'BMP expected'
+    off = struct.unpack_from('<I', d, 10)[0]
+    w, h, _, bpp, comp = struct.unpack_from('<iihhI', d, 18)
+    assert bpp == 24 and comp == 0, '24-bit uncompressed BMP expected'
+    stride = (w * 3 + 3) & ~3
+    s = sum(sum(d[off + y * stride:off + y * stride + w * 3]) for y in range(abs(h)))
+    return s / (255.0 * w * 3 * abs(h))
+
+
 def main():
     cmd = sys.argv[1]
     if cmd == 'neutral':
@@ -70,6 +84,13 @@ def main():
         print('DNGVersion %s photometric %d %dx%d spp %d bps %d sampleformat %d colormatrix %s neutral %s' % (
             '.'.join(map(str, t[50706])), t[262][0], w, h, spp, t[258][0], t.get(339, [1])[0],
             'yes' if 50721 in t else 'no', ['%.3f' % x for x in t.get(50728, [])]))
+    elif cmd == 'inner':
+        _, w, h, spp, v = read(sys.argv[2])
+        m, c = int(sys.argv[3]), 1 if spp == 3 else 0
+        x = [v[(y * w + i) * spp + c] for y in range(m, h - m) for i in range(m, w - m)]
+        print('%.4f' % (sum(x) / len(x)))
+    elif cmd == 'mean':
+        print('%.4f' % bmp_mean(sys.argv[2]))
 
 
 main()

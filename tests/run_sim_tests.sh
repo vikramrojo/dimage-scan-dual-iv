@@ -84,6 +84,19 @@ DSD4_SIM_FILM=nega run invert-nega 390x585 scan --dpi 400 --film nega --invert -
 read -r dr db <<< "$($IC neutral "$OUT/invert-nega.tiff")"
 echo "     inverted neutral scene: |R-G| $dr |B-G| $db"
 check invert-neutral gt 0.02 "$dr" && gt 0.02 "$db"
+# the holder's opaque edges in a full-frame scan must not count as the
+# negative's densest part (it squeezed the picture into the shadows)
+for f in bw-nega nega; do
+    DSD4_SIM_FILM=nega DSD4_SIM_NOISE=0.002 run inv-$f 390x585 scan --dpi 400 --film $f --invert --focus 37 -o "$OUT/inv-$f.tiff"
+    DSD4_SIM_FILM=nega DSD4_SIM_NOISE=0.002 DSD4_SIM_BORDER=60 run inv-$f-holder 390x585 scan --dpi 400 --film $f --invert --focus 37 -o "$OUT/inv-$f-holder.tiff"
+    a=$($IC inner "$OUT/inv-$f.tiff" 20); b=$($IC inner "$OUT/inv-$f-holder.tiff" 20)
+    echo "     $f inverted, frame mean: $a without, $b with the holder's edges"
+    check inv-$f-ignores-holder awk -v a="$a" -v b="$b" 'BEGIN { exit !(b > a * 0.85 && b < a * 1.15) }'
+done
+# linear positives are tagged linear, or apps show them far too dark
+for f in inv-bw-nega inv-nega; do
+    check $f-linear-profile grep -q "profile: .*Linear" <<< "$(sips -g profile "$OUT/$f.tiff")"
+done
 DSD4_SIM_FILM=nega run minolta-preview 390x585 preview --film nega --minolta --dpi 400 --focus 37 -o "$OUT/minolta-preview.tiff"
 if clang -O1 -Iinclude tests/minolta_cache.c build/libdsdual4.a -framework IOKit -framework CoreFoundation \
        -framework ApplicationServices -framework ImageIO -o "$OUT/minolta_cache" 2>"$OUT/mc.log"; then
@@ -117,10 +130,38 @@ run dng-hdr-clean 780x1170 scan --dpi 800 --focus 37 --format dng --hdr -o "$OUT
 ns=$($IC noise "$OUT/dng-raw.dng" "$OUT/dng-hdr-clean.dng" | cut -d' ' -f1)
 echo "     HDR merge of noiseless passes vs single pass: rms $ns"
 check hdr-no-seams gt 0.0005 "$ns"
-if [ "$(sips -g pixelWidth "$OUT/dng-hdr.dng" 2>/dev/null | awk '/pixel/{print $2}')" = 780 ] &&
-   sips -s format png "$OUT/dng-hdr.dng" --out "$OUT/hdr.png" >/dev/null 2>&1 && [ -s "$OUT/hdr.png" ]; then
-    echo "ok   dng-decodes-on-macos"; pass=$((pass+1))
-else echo "FAIL dng-decodes-on-macos"; failn=$((failn+1)); fi
+# macOS must render both DNG flavours with real content (a float DNG without
+# WhiteLevel decodes, but black)
+for f in dng-raw dng-hdr; do
+    m=-1
+    if [ "$(sips -g pixelWidth "$OUT/$f.dng" 2>/dev/null | awk '/pixel/{print $2}')" = 780 ] &&
+       sips -s format bmp "$OUT/$f.dng" --out "$OUT/$f-decoded.bmp" >/dev/null 2>&1; then
+        m=$($IC mean "$OUT/$f-decoded.bmp")
+    fi
+    echo "     $f decoded by macOS: mean level $m"
+    check $f-decodes-on-macos gt "$m" 0.2
+done
+
+# --invert with DNG: a positive linear sRGB DNG, the same inversion as an
+# ungained TIFF (16-bit exactly, float within its precision)
+run dng-invert       780x1170 scan --dpi 800 --focus 37 --film nega --invert --format dng -o "$OUT/dng-invert.dng"
+run dng-invert-ms2   780x1170 scan --dpi 800 --focus 37 --film nega --invert --samples 2 --format dng -o "$OUT/dng-invert-ms2.dng"
+run tiff-invert-raw  780x1170 scan --dpi 800 --focus 37 --film nega --invert --raw -o "$OUT/tiff-invert-raw.tiff"
+info=$($IC dng "$OUT/dng-invert.dng"); echo "     $info"
+check dng-invert-neutral grep -q "colormatrix yes neutral \['1.000', '1.000', '1.000'\]" <<< "$info"
+ni=$($IC noise "$OUT/tiff-invert-raw.tiff" "$OUT/dng-invert.dng" | cut -d' ' -f1)
+nf=$($IC noise "$OUT/tiff-invert-raw.tiff" "$OUT/dng-invert-ms2.dng" | cut -d' ' -f1)
+echo "     inverted DNG vs inverted TIFF: rms $ni (16-bit), $nf (float)"
+check dng-invert-matches-tiff gt 0.00001 "$ni"
+check dng-invert-float-matches-tiff gt 0.0005 "$nf"
+m=-1
+sips -s format bmp "$OUT/dng-invert.dng" --out "$OUT/dng-invert-decoded.bmp" >/dev/null 2>&1 &&
+    m=$($IC mean "$OUT/dng-invert-decoded.bmp")
+echo "     inverted DNG decoded by macOS: mean level $m"
+check dng-invert-decodes-on-macos awk -v m="$m" 'BEGIN { exit !(m > 0.1 && m < 0.7) }'
+if "$BIN" --sim -q scan --dpi 400 --film nega --minolta --format dng -o "$OUT/no.dng" >/dev/null 2>&1; then
+    echo "FAIL dng-minolta-refused"; failn=$((failn+1))
+else echo "ok   dng-minolta-refused"; pass=$((pass+1)); fi
 
 # --- super-resolution research: the measurements recover the simulated optics
 export DSD4_SIM_CHART=star

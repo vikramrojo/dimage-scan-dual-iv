@@ -6,6 +6,7 @@
 #include "../src/escl.h"
 #include "version.h"
 
+#include <CoreGraphics/CoreGraphics.h>
 #include <errno.h>
 #include <getopt.h>
 #include <math.h>
@@ -25,6 +26,27 @@ static char g_icc_path[PATH_MAX];
 static uint8_t *g_icc_n;    /* MLTF3200n.icc ("Nega Input") for Minolta-processed negatives */
 static size_t g_icc_n_len;
 static int g_progress_tty;
+
+/* macOS's linear sRGB / linear gray profile, for linear positives the scanner
+ * profile does not describe (inverted negatives, B&W slides): untagged,
+ * apps would take the linear data for gamma-encoded and show it far too dark */
+static const uint8_t *linear_icc(int gray, size_t *len)
+{
+    static uint8_t *icc[2];
+    static size_t n[2];
+    if (!icc[gray]) {
+        CGColorSpaceRef cs = CGColorSpaceCreateWithName(gray ? kCGColorSpaceLinearGray : kCGColorSpaceLinearSRGB);
+        CFDataRef d = cs ? CGColorSpaceCopyICCData(cs) : NULL;
+        if (d && (icc[gray] = malloc((size_t)CFDataGetLength(d)))) {
+            n[gray] = (size_t)CFDataGetLength(d);
+            memcpy(icc[gray], CFDataGetBytePtr(d), n[gray]);
+        }
+        if (d) CFRelease(d);
+        if (cs) CGColorSpaceRelease(cs);
+    }
+    *len = n[gray];
+    return icc[gray];
+}
 
 static void usage(void)
 {
@@ -81,12 +103,15 @@ static void usage(void)
 "  --focus <pos|auto|keep>   focus position (default auto)\n"
 "  --area <x,y,w,h>          crop in pixels at the output resolution\n"
 "  --samples <1|2|4|8>       multi-sample scanning (default 1)\n"
-"  --invert                  invert negatives (auto levels per channel)\n"
+"  --invert                  invert negatives (auto levels per channel); with\n"
+"                            --format dng: a positive linear DNG (sRGB) for\n"
+"                            Photos and Preview\n"
 "  --minolta                 negatives: the original Minolta auto-exposure and\n"
 "                            film curves (prescan + positive result)\n"
 "  --raw                     no host-side digital gain\n"
 "  --format <tiff|dng>       dng: raw linear DNG for raw converters (Lightroom,\n"
-"                            darktable, Negative Lab Pro); implies --raw\n"
+"                            darktable, Negative Lab Pro); implies --raw;\n"
+"                            negatives stay negative unless --invert\n"
 "  --hdr[=ev]                DNG only: second pass ev stops brighter (default 2),\n"
 "                            aligned and merged for cleaner shadows\n"
 "  --dng-bits <half|32|16>   with multi-sampling or HDR: half (default) = 16-bit\n"
@@ -393,9 +418,14 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         fprintf(stderr, "dsdual4: HDR needs raw output (--format dng)\n");
         return 1;
     }
-    /* DNG is the scanner's raw data: no inversion, curves or display conversion */
+    /* DNG is the scanner's raw data: no curves or display conversion, and
+     * negatives are only inverted on request (a positive sRGB DNG) */
+    if (o->minolta && negative && dng) {
+        fprintf(stderr, "dsdual4: Minolta processing makes TIFFs only; use --invert for a positive DNG\n");
+        return 1;
+    }
     const int minolta = o->minolta && negative && !dng;
-    const int invert = o->invert && !dng;
+    const int invert = o->invert;
     if (dng) {
         p.raw = 1;
         p.float_out = o->dng_bits != 16 && (p.multi_sample > 1 || o->hdr_ev > 0);
@@ -433,12 +463,15 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     }
     /* the scanner profile describes linear colour positives only */
     /* slides: Posi Linear profile; Minolta-processed colour negatives: Nega Input */
+    /* other linear positives (inverted negatives, B&W slides): linear sRGB/gray */
     const uint8_t *icc = NULL;
     size_t icc_len = 0;
     if (!dng && !o->no_profile && im.channels == 3) {
         if (p.film == DSD4_FILM_POSITIVE_COLOR && !invert && !o->display) { icc = g_icc; icc_len = g_icc_len; }
         else if (minolta) { icc = g_icc_n; icc_len = g_icc_n_len; }
     }
+    const int linear_pos = !dng && !o->no_profile && !o->display && !minolta && (invert || !negative);
+    if (!icc && linear_pos) icc = linear_icc(im.channels == 1, &icc_len);
     const int embed = icc != NULL;
     r = dng ? dsd4_write_dng(&im, path, o->dng_bits == 16 ? 0 : o->dng_bits == 32 ? 32 : 16, g_icc, g_icc_len)
             : dsd4_write_tiff_icc(&im, path, icc, icc_len);
@@ -449,13 +482,17 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     }
     const char *depth = im.bits == 8 ? "8-bit" : im.bits == 16 ? "16-bit"
                       : o->dng_bits == 32 ? "32-bit float" : o->dng_bits == 16 ? "16-bit" : "16-bit float";
-    if (g_verbose >= 1)
+    if (g_verbose >= 1 && dng && im.inverted)
+        fprintf(stderr, "wrote %s: %dx%d, %s %s, %d dpi, focus %d, inverted DNG (linear sRGB)\n", path, im.width,
+                im.height, depth, im.channels == 3 ? "RGB" : "gray", im.dpi, im.focus);
+    else if (g_verbose >= 1)
         fprintf(stderr, "wrote %s: %dx%d, %s %s, %d dpi, focus %d, %s %.2f/%.2f/%.2f%s\n",
                 path, im.width, im.height, depth, im.channels == 3 ? "RGB" : "gray",
                 im.dpi, im.focus, dng ? "raw DNG, white balance" : "digital gain",
                 dng ? im.raw_gain[0] : im.digital_gain[0], dng ? im.raw_gain[1] : im.digital_gain[1],
                 dng ? im.raw_gain[2] : im.digital_gain[2],
-                embed ? (minolta ? ", Nega Input profile embedded" : ", scanner profile embedded") : "");
+                embed ? (minolta ? ", Nega Input profile embedded"
+                         : icc == g_icc ? ", scanner profile embedded" : ", linear profile embedded") : "");
     dsd4_image_free(&im);
     return 0;
 }
@@ -552,7 +589,7 @@ static void apply_neg_mode(scan_opts *o, int neg_mode)
     o->minolta = 0;
     if (!is_negative(o->p.film)) return;
     if (neg_mode == NEG_INVERT) o->invert = 1;
-    else if (neg_mode == NEG_MINOLTA) o->minolta = 1;
+    else if (neg_mode == NEG_MINOLTA && !o->dng) o->minolta = 1; /* DNG: raw negative */
 }
 
 static void area_text(const scan_opts *c, char *b, size_t n)
@@ -570,7 +607,9 @@ static void scan_settings(scan_opts *c, int *neg_mode)
         printf("    1  Film type     %s\n", film_name(c->p.film));
         printf("    2  Size          %s\n", area);
         printf("    3  Resolution    %d dpi\n", c->p.dpi);
-        if (c->dng) printf("    %s4  Negatives     (DNG is raw: invert in your raw converter)%s\n", C("2"), C("0"));
+        if (is_negative(c->p.film) && c->dng)
+            printf("    4  Negatives     %s\n", *neg_mode == NEG_INVERT ? "simple invert (positive DNG)"
+                                                : "raw negative (invert in your raw converter)");
         else if (is_negative(c->p.film)) printf("    4  Negatives     %s\n", neg_mode_name(*neg_mode));
         else printf("    %s4  Negatives     (only for negative film)%s\n", C("2"), C("0"));
         printf("    5  Output        %s\n", c->dng ? "DNG raw (for Lightroom, darktable, Negative Lab Pro)"
@@ -605,6 +644,15 @@ static void scan_settings(scan_opts *c, int *neg_mode)
         }
         case '4':
             if (!is_negative(c->p.film)) { printf("    Choose a negative film type first.\n"); break; }
+            if (c->dng) {
+                printf("    1 raw negative - the scanner's data with its colour calibration, to\n"
+                       "      invert in Negative Lab Pro, darktable, Lightroom, ...\n"
+                       "    2 simple invert - a positive DNG (linear sRGB) that Photos and\n"
+                       "      Preview show directly\n"
+                       "    (Minolta processing makes TIFFs only)\n");
+                *neg_mode = ask_int("    Negatives", *neg_mode == NEG_INVERT ? 2 : 1, 1, 2) == 2 ? NEG_INVERT : NEG_RAW;
+                break;
+            }
             printf("    1 raw negative - keep the negative as scanned, to invert later in\n"
                    "      Negative Lab Pro, darktable, ColorPerfect, ...\n"
                    "    2 simple invert - quick per-channel inversion\n"
@@ -805,7 +853,7 @@ static int run_menu(dsd4 *s, int fw_check)
     dsd4_default_params(&cfg.p);
     cfg.p.dpi = 3200;
     int display_scans = 0, open_after = 1, initialized = 0;
-    int neg_mode = NEG_INVERT, use_profile = g_icc != NULL;
+    int neg_mode = NEG_MINOLTA, use_profile = g_icc != NULL;
     preview_cfg pv = { 800, 1, NEG_MINOLTA };
     menu_state ms = { &cfg, &neg_mode, &display_scans, &open_after, &use_profile, &pv, outdir, sizeof outdir };
     load_settings(&ms);
@@ -839,7 +887,8 @@ static int run_menu(dsd4 *s, int fw_check)
             char area[64];
             area_text(&cfg, area, sizeof area);
             if (cfg.dng)
-                printf(" Scan       %s, %s, %d dpi, DNG raw%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
+                printf(" Scan       %s, %s, %d dpi, DNG %s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
+                       is_negative(cfg.p.film) && neg_mode == NEG_INVERT ? "inverted" : "raw",
                        cfg.hdr_ev > 0 ? " + HDR" : "");
             else
                 printf(" Scan       %s, %s, %d dpi%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,

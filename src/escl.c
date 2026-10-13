@@ -866,7 +866,7 @@ int dsd4_escl_serve(dsd4 *s, const dsd4_escl_options *o)
     make_uuid(g.uuid);
     g.film = o->film;
     g.autofocus = 1;
-    g.invert = 1;
+    g.invert = 2; /* negatives: Minolta processing */
     g.samples = 1;
     snprintf(g.status, sizeof g.status, "idle");
     pthread_mutex_init(&g.lock, NULL);

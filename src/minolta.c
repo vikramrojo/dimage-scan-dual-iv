@@ -369,7 +369,7 @@ int dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_e
     ae_base_gain(film, base);
     const int ich = in->channels, och = color ? 3 : 1;
     const int k = in->dpi > 800 ? (in->dpi + 400) / 800 : 1;
-    dsd4_image pim = { in->width / k, in->height / k, och, 16, 800, 0, NULL, { 1, 1, 1 }, 0, { 1, 1, 1 } };
+    dsd4_image pim = { in->width / k, in->height / k, och, 16, 800, 0, NULL, { 1, 1, 1 }, 0, { 1, 1, 1 }, 0 };
     pim.stride = (size_t)pim.width * och * 2;
     pim.data = malloc(pim.stride * pim.height);
     if (!pim.data) return DSD4_ERR_NOMEM;

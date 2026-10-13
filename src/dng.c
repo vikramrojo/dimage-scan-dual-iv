@@ -11,6 +11,11 @@
  * output would have applied but a raw file leaves out) as ColorMatrix1, so
  * raw converters reproduce what ColorSync does with the TIFF.  Without a
  * profile the built-in colorants below are used with linear curves.
+ *
+ * An inverted negative is no longer the light the scanner measured but a
+ * picture made from the film's densities, so the calibration does not
+ * apply: it is written as linear sRGB (D65), neutral white balance, for apps
+ * without a negative conversion of their own (Photos, Preview).
  */
 #include "dsd4_internal.h"
 
@@ -24,8 +29,14 @@ static const double K_CAM_TO_XYZ[9] = { /* rXYZ gXYZ bXYZ as columns, /65536 */
     89 / 65536.0,    -9736 / 65536.0, 63706 / 65536.0,
 };
 
+static const double K_SRGB_TO_XYZ[9] = { /* linear sRGB -> XYZ D65 */
+    0.4124564, 0.3575761, 0.1804375,
+    0.2126729, 0.7151522, 0.0721750,
+    0.0193339, 0.1191920, 0.9503041,
+};
+
 typedef struct {
-    double m[9];          /* camera -> XYZ D50 */
+    double m[9];          /* camera -> XYZ (D50; D65 for inverted negatives) */
     int n[3];             /* curve points per channel (0: linear) */
     double gamma[3];      /* n == 1 */
     uint16_t *curve[3];
@@ -178,7 +189,7 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     if (img->bits != 16 && img->bits != 32) return DSD4_ERR_PARAM;
     if (img->channels != 1 && img->channels != 3) return DSD4_ERR_PARAM;
     if (float_bits != 0 && float_bits != 16 && float_bits != 32) return DSD4_ERR_PARAM;
-    const int ch = img->channels, fl = img->bits == 32 && float_bits;
+    const int ch = img->channels, fl = img->bits == 32 && float_bits, pos = img->inverted;
     const int bps = fl ? float_bits : 16;
     const size_t row = (size_t)img->width * ch * (bps / 8);
     uint32_t rps = (uint32_t)(row ? (1u << 20) / row : 1);
@@ -192,14 +203,14 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
         double applied = img->digital_gain[c] > 0 ? img->digital_gain[c] : 1;
         double would = img->raw_gain[c] > 0 ? img->raw_gain[c] : applied;
         pend[c] = would / applied;
-        if (!(pend[c] > 0)) pend[c] = 1;
+        if (!(pend[c] > 0) || pos) pend[c] = 1;
     }
     double pmin = ch == 3 ? fmin(pend[0], fmin(pend[1], pend[2])) : pend[0];
     profile_t pr;
-    if (!icc || parse_icc((const uint8_t *)icc, icc_len, &pr)) {
-        if (icc) free_profile(&pr);
+    if (pos || !icc || parse_icc((const uint8_t *)icc, icc_len, &pr)) {
+        if (!pos && icc) free_profile(&pr);
         memset(&pr, 0, sizeof pr);
-        memcpy(pr.m, K_CAM_TO_XYZ, sizeof pr.m);
+        memcpy(pr.m, pos ? K_SRGB_TO_XYZ : K_CAM_TO_XYZ, sizeof pr.m);
     }
 
     ifd_t d = { .n = 0 };
@@ -231,7 +242,7 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     e = add(&d, 50707, T_BYTE, 4);
     e->data[0] = 1; e->data[1] = fl ? 4 : 1;
     add_ascii(&d, 50708, "Konica Minolta DiMAGE Scan Dual IV");
-    if (!fl) add_long(&d, 50717, 65535); /* WhiteLevel (float: 1.0 by default) */
+    add_long(&d, 50717, fl ? 1 : 65535); /* WhiteLevel */
     if (ch == 3) {
         /* camera -> XYZ = K * diag(pend); ColorMatrix1 = its inverse */
         double m[9], inv[9], neutral[3];
@@ -247,8 +258,8 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     double be = log2(pmin);
     add_rational(&d, 50730, T_SRATIONAL, 1, &be); /* BaselineExposure */
     if (ch == 3) {
-        uint16_t d50 = 23;
-        add_short(&d, 50778, 1, &d50); /* CalibrationIlluminant1 */
+        uint16_t illum = pos ? 21 : 23; /* D65 : D50 */
+        add_short(&d, 50778, 1, &illum); /* CalibrationIlluminant1 */
     }
     qsort(d.e, (size_t)d.n, sizeof *d.e, cmp_entry);
 

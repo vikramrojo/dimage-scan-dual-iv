@@ -38,7 +38,7 @@ make install-agent                     # optional: Image Capture service for thi
 make pkg                               # optional: build/dsdual4-<version>.pkg
 ```
 
-The version number is `1.0.<commit count>`; `dsdual4 --version` shows it.
+The version number is `1.1.<commit count>`; `dsdual4 --version` shows it.
 
 To make a signed release, set `SIGN_APP`, `SIGN_INSTALLER` (your Developer ID
 certificate names) and `NOTARY_PROFILE` (from `xcrun notarytool
@@ -63,6 +63,7 @@ dsdual4 scan --frame 3 --dpi 3200 -o s.tiff  # 16-bit TIFF
 dsdual4 scan --film nega --minolta -o n.tiff # negative, original Minolta processing
 dsdual4 scan --format dng --samples 8 -o r.dng   # raw DNG, 8x multi-sampled
 dsdual4 scan --format dng --hdr -o h.dng     # raw DNG, two exposures merged
+dsdual4 scan --film nega --invert --format dng -o p.dng   # negative as a positive DNG
 dsdual4 scan-all -o roll                     # roll-1.tiff ... roll-6.tiff
 dsdual4 convert raw.tiff --film bw-nega -o out.tiff   # process an existing raw negative
 dsdual4 eject | home | reset | autofocus | info
@@ -86,9 +87,10 @@ Scans are linear 16-bit device RGB. Colour slide scans embed Konica Minolta's
 The scanner itself never inverts negatives. There are three ways to handle
 them:
 
-* **Minolta processing:** the original software's pipeline. It runs
-  autofocus, an auto-exposure prescan, a rescan at the chosen exposure, and
-  the original film curves. Colour results embed `MLTF3200n.icc`.
+* **Minolta processing** (the default in the menu and Image Capture): the
+  original software's pipeline. It runs autofocus, an auto-exposure prescan,
+  a rescan at the chosen exposure, and the original film curves. Colour
+  results embed `MLTF3200n.icc`.
 * **Simple invert:** works in density, like the film itself. It removes the
   orange mask and balances the channels' contrast.
 * **Raw:** keeps the negative as scanned, for Negative Lab Pro, darktable and
@@ -112,6 +114,12 @@ macOS all open it.
 * **HDR** (`--hdr`): a second pass 2 stops brighter, aligned to the first
   to within a fraction of a line and merged. This gives about 4× less noise
   in the dense areas: slide shadows, and negative highlights.
+* **Negatives** stay negative, for Negative Lab Pro and other raw converters
+  that invert them. Add `--invert`, or choose **Negatives → simple invert**,
+  for a positive DNG that Photos and Preview show directly. It is the simple
+  invert above, kept linear (and float, with multi-sampling or HDR), and
+  stored as linear sRGB: the scanner's calibration describes the light
+  through the film, not the inverted picture. Minolta processing is TIFF only.
 
 These don't add resolution. The Dual IV's sensor and line steps are fixed,
 so every pass samples the same points. Multi-sampling and HDR improve the
