@@ -61,6 +61,8 @@ dsdual4 init                                 # warm up lamp + calibrate (first t
 dsdual4 preview -o p.tiff                    # quick preview of the current frame
 dsdual4 scan --frame 3 --dpi 3200 -o s.tiff  # 16-bit TIFF
 dsdual4 scan --film nega --minolta -o n.tiff # negative, original Minolta processing
+dsdual4 scan --format dng --samples 8 -o r.dng   # raw DNG, 8x multi-sampled
+dsdual4 scan --format dng --hdr -o h.dng     # raw DNG, two exposures merged
 dsdual4 scan-all -o roll                     # roll-1.tiff ... roll-6.tiff
 dsdual4 convert raw.tiff --film bw-nega -o out.tiff   # process an existing raw negative
 dsdual4 eject | home | reset | autofocus | info
@@ -68,7 +70,8 @@ dsdual4 eject | home | reset | autofocus | info
 
 * **Options:** `--film posi|nega|bw-posi|bw-nega`, `--dpi 50..3200`,
   `--bits 8|16`, `--ev ±stops`, `--focus auto|keep|N`, `--samples 1..8`,
-  `--invert`, `--flip-x`, `--rotate`.
+  `--invert`, `--minolta`, `--format tiff|dng`, `--hdr[=ev]`,
+  `--af fast|classic`, `--flip-x`, `--rotate`.
 * **Diagnostics:** `-v` to `-vvvv` for progress, a protocol trace or hex dumps.
 * **`dsdual4 --help`** lists everything.
 
@@ -86,9 +89,39 @@ them:
 * **Minolta processing:** the original software's pipeline. It runs
   autofocus, an auto-exposure prescan, a rescan at the chosen exposure, and
   the original film curves. Colour results embed `MLTF3200n.icc`.
-* **Simple invert:** a per-channel inversion that removes the orange mask.
+* **Simple invert:** works in density, like the film itself. It removes the
+  orange mask and balances the channels' contrast.
 * **Raw:** keeps the negative as scanned, for Negative Lab Pro, darktable and
   similar tools.
+
+Previews can use Minolta processing too. It needs only the one 800 dpi preview
+scan, and a full scan of that frame afterwards reuses its exposure.
+
+## Raw DNG, multi-sampling and HDR
+
+`--format dng`, or **Output → DNG raw** in the menu's scan settings, saves the
+scanner's linear data as a DNG. Lightroom, darktable, Negative Lab Pro and
+macOS all open it.
+
+* **Colour:** Konica Minolta's own calibration (the `MLTF3200p.icc` matrix
+  and per-channel curves), so raw converters show the same colour as the
+  profiled TIFF.
+* **Multi-sampling** (`--samples 2/4/8`): about √N less noise. Single bad
+  reads are discarded. The averaged result is kept as a 16-bit float DNG,
+  rather than rounded.
+* **HDR** (`--hdr`): a second pass 2 stops brighter, aligned to the first
+  to within a fraction of a line and merged. This gives about 4× less noise
+  in the dense areas: slide shadows, and negative highlights.
+
+These don't add resolution. The Dual IV's sensor and line steps are fixed,
+so every pass samples the same points. Multi-sampling and HDR improve the
+cleanliness and precision of each pixel. Raw DNGs are made from the menu or
+the command line; Image Capture can't receive them.
+
+**Autofocus** runs a fast search by default: about a third of the original's
+lens moves, with a peak fit. It also tries other parts of the frame when the
+centre is featureless. `--af classic` (or the device setting) runs the
+original sequence.
 
 Not included: the original software's Digital ICE, Pixel Polish and Grain
 Dissolver, and index scans.
@@ -99,7 +132,7 @@ The driver was reverse engineered from the original PowerPC software, using
 Ghidra and the PEF/Mach-O tools in `docs/re-tools/`. The recovered USB
 protocol is documented in `docs/PROTOCOL.md`.
 
-* **`make test`:** 23 end-to-end tests against a built-in scanner simulator
+* **`make test`:** 44 end-to-end tests against a built-in scanner simulator
   (`dsdual4 --sim`).
 * **`make difftest`:** runs the original PowerPC code in the Unicorn emulator,
   side by side with the port.

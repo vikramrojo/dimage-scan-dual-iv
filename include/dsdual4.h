@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -79,7 +80,17 @@ typedef struct {
     int preview;              /* 1: fast 800 dpi preview of the whole frame */
     int multi_sample;         /* 1 (default), 2, 4 or 8 */
     int raw;                  /* 1: no host-side digital gain */
+    int af_mode;              /* DSD4_AF_FAST (default) or DSD4_AF_CLASSIC */
+    int float_out;            /* 1: 32-bit float samples (image bits = 32), keeping
+                                 the full precision of multi-sampling */
+    int unlimited_exposure;   /* 1: allow exposures above the original software's
+                                 3x cap, up to the hardware maximum (HDR) */
 } dsd4_scan_params;
+
+/* autofocus: fast (coarse/fine search with a peak fit, ~3x fewer lens moves)
+ * or the original software's exhaustive sequence */
+#define DSD4_AF_FAST    0
+#define DSD4_AF_CLASSIC 1
 
 #define DSD4_FOCUS_AUTO   0x7fff
 #define DSD4_FOCUS_KEEP   0x7ffe
@@ -87,12 +98,14 @@ typedef struct {
 typedef struct {
     int width, height;        /* pixels */
     int channels;             /* 3 (RGB) or 1 (gray) */
-    int bits;                 /* 8 or 16 */
+    int bits;                 /* 8, 16, or 32 (float, 1.0 = full scale) */
     int dpi;
     size_t stride;            /* bytes per line */
-    uint8_t *data;            /* 16 bit samples are host-endian */
-    double digital_gain[3];
+    uint8_t *data;            /* 16 bit and float samples are host-endian */
+    double digital_gain[3];   /* host gain applied */
     int focus;                /* focus position used */
+    double raw_gain[3];       /* raw scans: the gain normal output would have
+                                 applied (white balance for raw converters) */
 } dsd4_image;
 
 /* lifecycle */
@@ -142,6 +155,39 @@ typedef struct {
 int  dsd4_scan_minolta(dsd4 *s, const dsd4_scan_params *p, dsd4_image *img, dsd4_minolta_info *info,
                        dsd4_progress_fn cb, void *ud);
 
+/* Preview of a negative with the Minolta processing from a single 800 dpi
+ * scan (it is also the AE prescan).  The AE result is remembered for the
+ * frame, so a dsd4_scan_minolta() of the same frame skips its prescan. */
+int  dsd4_preview_minolta(dsd4 *s, const dsd4_scan_params *p, dsd4_image *img, dsd4_minolta_info *info,
+                          dsd4_progress_fn cb, void *ud);
+
+/* HDR: a raw float scan at the requested exposure plus a second pass 'ev'
+ * stops brighter (capped by the hardware), aligned to sub-pixel accuracy
+ * and merged in linear light: about 'ev' more stops of clean shadow data. */
+typedef struct {
+    double ev;                /* exposure difference actually achieved */
+    double ratio[3];          /* measured long/short ratio per channel */
+    double shift;             /* vertical offset of the second pass, lines */
+} dsd4_hdr_info;
+int  dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *p, double ev, dsd4_image *img, dsd4_hdr_info *info,
+                   dsd4_progress_fn cb, void *ud);
+
+/* Linear DNG ("raw") output for raw converters (Lightroom, darktable, Negative
+ * Lab Pro).  16-bit images are written as integers.  Float images: float_bits
+ * 16 (half float, what Lightroom's HDR DNGs use and macOS decodes), 32 (full
+ * float; darktable/RawTherapee, not macOS), or 0 (rounded to 16-bit integer).
+ * icc: the scanner's input profile (MLTF3200p.icc, "Posi Linear"); its
+ * matrix becomes the DNG colour matrix and its per-channel curves are applied
+ * to the samples.  NULL: built-in matrix, linear curves. */
+int  dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, const void *icc, size_t icc_len);
+
+/* Diagnostics for multi-pass super-resolution ("dsdual4 research"): which =
+ * "nyquist", "focus", "jitter", "yres" or "all".  Scans strips of the
+ * current/selected frame and writes a report; outdir (or NULL) receives
+ * DNG crops. */
+int  dsd4_research(dsd4 *s, const dsd4_scan_params *p, const char *which, const char *outdir, FILE *report,
+                   dsd4_progress_fn cb, void *ud);
+
 /* Offline: apply the Minolta processing to an existing raw (linear, not
  * inverted) negative scan; in_exposure = the exposure factors it was scanned
  * with.  Needs the calibration cache written by dsd4_initialize(). */
@@ -152,6 +198,8 @@ int  dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_
 int  dsd4_read_tiff(const char *path, dsd4_image *img);
 
 /* simple post-processing helpers for raw scans */
+/* negative -> positive in density space: film base (orange mask) removal and
+ * per-channel contrast matching.  Linear output (8/16 bit). */
 void dsd4_invert_negative(dsd4_image *img, int auto_levels);
 int  dsd4_write_tiff(const dsd4_image *img, const char *path);
 /* same, embedding an ICC profile (TIFF tag 34675) when icc != NULL */

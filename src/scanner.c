@@ -61,6 +61,7 @@ typedef struct {
     double exp[4];      /* +0x60 exposure factors */
     double cap[4];      /* +0x80 AE/standard gain (exposure cap base) */
     int16_t focus;      /* +0xa0 */
+    int unlimited;      /* host extension: no 3x software exposure cap (HDR) */
 } line_setting;
 
 /* --------------------------------------------------------------- logging */
@@ -161,6 +162,7 @@ void dsd4_close(dsd4 *s)
     if (s->scanning) avl_stop_scan(s);
     free(s->pack_buf);
     free(s->accum);
+    free(s->ae_cache.tab);
     if (s->t) s->t->close(s->t);
     free(s);
 }
@@ -267,6 +269,7 @@ int dsd4_initialize(dsd4 *s, int allow_fw, dsd4_progress_fn cb, void *ud)
             }
         }
     }
+    s->ae_cache.valid = 0; /* new shading tables */
     /* CBaseScannerAVI::InitializeBaseScanner */
     avl_initialize_driver(s);
     s->speed_mode = 1;
@@ -322,6 +325,7 @@ int dsd4_select_frame(dsd4 *s, int frame)
 
 int dsd4_eject(dsd4 *s)
 {
+    s->ae_cache.valid = 0;
     if (!avl_send_holder_control(s, 0xff)) return fail(s);
     s->carriage_out = 0;
     return DSD4_OK;
@@ -340,6 +344,7 @@ int dsd4_home(dsd4 *s)
 int dsd4_reset(dsd4 *s, int seconds)
 {
     if (s->scanning) avl_stop_scan(s);
+    s->ae_cache.valid = 0;
     avl_reset_to_initial_state(s, 0); /* may be refused while the holder is moving */
     for (int t = 0; t < seconds * 2; t++) {
         if (av_test_unit_ready(s)) {
@@ -444,7 +449,7 @@ static void check_gain_limit(dsd4 *s, line_setting *ls, double dg[3])
             if (t > lim) { g = (double)t / lim; f = (double)lim / s->base_exp[c]; }
             else if (t < lo) { g = (double)t / lo; f = (double)lo / s->base_exp[c]; }
         }
-        if (ls->mode == MODE_FINAL) {
+        if (ls->mode == MODE_FINAL && !ls->unlimited) {
             double cap = ls->cap[c] * capmul[c];
             if (cap < f) { g *= f / cap; f = cap; }
         }
@@ -544,8 +549,10 @@ typedef struct {
     const char *stage;
 } progress;
 
-/* SetWindow + StartScan + read 'lines' lines + StopScan */
-static int line_scan(dsd4 *s, line_setting *ls, uint8_t *out, size_t stride, uint32_t lines,
+/* SetWindow + StartScan + read 'lines' lines + StopScan.  Output: 16-bit
+ * samples in 'out', or (fout != NULL) float samples, 1.0 = full scale, with
+ * the digital gain applied but not clipped. */
+static int line_scan(dsd4 *s, line_setting *ls, uint8_t *out, float *fout, size_t stride, uint32_t lines,
                      const double dg[3], progress *pg)
 {
     sp_t p;
@@ -560,34 +567,55 @@ static int line_scan(dsd4 *s, line_setting *ls, uint8_t *out, size_t stride, uin
     /* ReadScan lengths are in output bytes: one channel when gray is
      * extracted from a colour scan ([b222]) */
     const uint32_t lb = s->gray_from_color ? s->line_bytes / 3u : s->line_bytes;
+    const uint32_t spl = lb / 2; /* samples per line */
+    const int ch = ls->gray ? 1 : 3;
     const unsigned samples = p.multi_sample ? p.multi_sample : 1;
     const uint32_t chunk_lines = samples > 1 ? 1 : (lb ? (256u * 1024u) / lb + 1 : 1);
-    uint32_t *acc = samples > 1 ? malloc((size_t)lb / 2 * sizeof *acc) : NULL;
+    /* multi-sample: every copy of the line is kept, then combined per pixel
+     * (mean, with outlier rejection from 4 samples).  float: a 16-bit staging
+     * buffer for the chunk. */
+    uint16_t *ms = samples > 1 ? malloc((size_t)lb * samples) : NULL;
+    uint16_t *stage = fout && samples == 1 ? malloc((size_t)lb * chunk_lines) : NULL;
     uint32_t done = 0;
     int ok = 1;
-    if (samples > 1 && !acc) { s->last_error = AVE_NOMEM; ok = 0; }
+    if ((samples > 1 && !ms) || (fout && samples == 1 && !stage)) { s->last_error = AVE_NOMEM; ok = 0; }
+    float fg[3];
+    for (int c = 0; c < 3; c++) fg[c] = (float)(dg[c] / 65535.0);
     while (ok && done < lines) {
         uint32_t n = lines - done < chunk_lines ? lines - done : chunk_lines;
-        uint8_t *dst = out + (size_t)done * stride;
+        uint8_t *dst = out ? out + (size_t)done * stride : NULL;
+        float *fdst = fout ? (float *)((uint8_t *)fout + (size_t)done * stride) : NULL;
         if (samples > 1) {
             /* MultiSampleScan: the scanner sends every line 'samples' times */
-            uint16_t *w = (uint16_t *)dst;
-            memset(acc, 0, (size_t)lb / 2 * sizeof *acc);
-            for (unsigned k = 0; k < samples && ok; k++) {
-                if (!avl_read_scan(s, dst, lb) || s->read_failed) ok = 0;
-                for (uint32_t i = 0; ok && i < lb / 2; i++) acc[i] += w[i];
-            }
+            for (unsigned k = 0; k < samples && ok; k++)
+                if (!avl_read_scan(s, ms + (size_t)k * spl, lb) || s->read_failed) ok = 0;
             if (!ok) break;
-            for (uint32_t i = 0; i < lb / 2; i++) w[i] = (uint16_t)(acc[i] / samples);
-        } else if (!avl_read_scan(s, dst, n * lb) || s->read_failed) {
-            ok = 0;
-            break;
+            for (uint32_t i = 0; i < spl; i++) {
+                double m = dsd4_robust_mean16(ms + i, samples, spl);
+                if (s->dbg_var) {
+                    double v = 0;
+                    for (unsigned k = 0; k < samples; k++) {
+                        double d = ms[(size_t)k * spl + i] - m;
+                        v += d * d;
+                    }
+                    s->dbg_var[(size_t)done * spl + i] = (float)(v / (samples - 1) / (65535.0 * 65535.0));
+                }
+                if (fdst) fdst[i] = (float)m * fg[i % ch];
+                else ((uint16_t *)dst)[i] = (uint16_t)(m + 0.5);
+            }
+            if (dst && ls->depth16) apply_gain16((uint16_t *)dst, spl, ch, dg);
+        } else if (fdst) {
+            if (!avl_read_scan(s, stage, n * lb) || s->read_failed) { ok = 0; break; }
+            for (size_t i = 0; i < (size_t)n * spl; i++) fdst[i] = stage[i] * fg[i % ch];
+        } else {
+            if (!avl_read_scan(s, dst, n * lb) || s->read_failed) { ok = 0; break; }
+            if (ls->depth16) apply_gain16((uint16_t *)dst, (size_t)n * spl, ch, dg);
         }
-        if (ls->depth16) apply_gain16((uint16_t *)dst, (size_t)n * lb / 2, ls->gray ? 1 : 3, dg);
         done += n;
         if (pg && pg->cb) pg->cb(pg->ud, pg->stage, (double)done / lines);
     }
-    free(acc);
+    free(ms);
+    free(stage);
     int e = s->last_error;
     if (!avl_stop_scan(s)) ok = 0;
     else if (!ok) s->last_error = e ? e : AVE_GENERIC;
@@ -631,6 +659,22 @@ static uint32_t sharpness(const uint16_t *line, unsigned n)
             sum[c] += (uint32_t)(v < 0 ? -v : v);
         }
     return (uint32_t)sqrtf((float)((sum[2] + sum[0] * 3 + sum[1] * 6) / 10));
+}
+
+/* fast AF: the same 3:6:1 weighted second difference on full 16-bit data,
+ * divided by the mean level so exposure changes between lens positions do
+ * not bias it, and dense film still gives a usable signal */
+static double sharpness16(const uint16_t *line, unsigned n)
+{
+    static const double wt[3] = { 3, 6, 1 };
+    double sum = 0, lvl = 0;
+    for (unsigned c = 0; c < 3; c++)
+        for (unsigned i = 1; i + 1 < n; i++) {
+            int v = 2 * line[i * 3 + c] - line[(i - 1) * 3 + c] - line[(i + 1) * 3 + c];
+            sum += wt[c] * (v < 0 ? -v : v);
+            lvl += wt[c] * line[i * 3 + c];
+        }
+    return sum / (lvl + 64.0 * n);
 }
 
 typedef struct {
@@ -698,6 +742,97 @@ static int pre_focus_scan(dsd4 *s, af_state *af, int16_t pos, unsigned count)
     return ok;
 }
 
+/* lens sweep in the given (descending) order; metric per position */
+static int af_sweep(dsd4 *s, af_state *af, const int16_t *pos, int n, unsigned reads, double *m,
+                    dsd4_progress_fn cb, void *ud, const char *stage)
+{
+    for (int i = 0; i < n; i++) {
+        if (!focus_scan(s, af, pos[i], reads, NULL)) return 0;
+        m[i] = sharpness16(af->line, s->line_bytes / 6u);
+        dsd4_logf(s, 3, "focus %4d: %.5f", pos[i], m[i]);
+        if (cb) cb(ud, stage, (double)(i + 1) / n);
+    }
+    return 1;
+}
+
+/* peak-to-median contrast of a focus curve: ~1 when the window is featureless */
+static double af_contrast(const double *m, int n)
+{
+    double v[64], mx = 0;
+    for (int i = 0; i < n; i++) { v[i] = m[i]; if (m[i] > mx) mx = m[i]; }
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && v[j - 1] > v[j]; j--) { double x = v[j]; v[j] = v[j - 1]; v[j - 1] = x; }
+    double med = v[n / 2];
+    return med > 0 ? mx / med : 0;
+}
+
+static int af_argmax(const double *m, int n)
+{
+    int b = 0;
+    for (int i = 1; i < n; i++) if (m[i] > m[b]) b = i;
+    return b;
+}
+
+/* coarse sweep (1 read, step 20) on up to three windows, a fine sweep (2
+ * reads, step 5) around the peak, then a parabola through the log metric */
+static int autofocus_fast(dsd4 *s, af_state *af, uint32_t frame_w, int *best_out, dsd4_progress_fn cb, void *ud)
+{
+    enum { NC = 21, NF = 9 };
+    int16_t cpos[NC];
+    double mc[NC], bestc[NC], best_con = -1;
+    uint32_t best_x = af->ls.x;
+    for (int k = 0; k < NC; k++) cpos[k] = (int16_t)(200 - 20 * k);
+    /* centre first; other windows only when the centre is featureless */
+    const uint32_t cx = af->ls.x;
+    const uint32_t off = frame_w / 4;
+    uint32_t xs[3] = { cx, cx > off ? cx - off : 0, cx + off + 256 <= frame_w ? cx + off : frame_w - 256 };
+    for (int wi = 0; wi < 3; wi++) {
+        if (wi) {
+            if (best_con >= 1.25) break;
+            if (af->session) { avl_stop_scan(s); af->session = 0; }
+            af->ls.x = xs[wi];
+            dsd4_logf(s, 2, "autofocus: low contrast, trying window at x=%u", xs[wi]);
+        }
+        if (!focus_scan(s, af, 250, 1, NULL)) return 0; /* backlash: approach from above */
+        av_delay_ticks(6);
+        if (!af_sweep(s, af, cpos, NC, 1, mc, cb, ud, "autofocus (coarse)")) return 0;
+        double con = af_contrast(mc, NC);
+        if (con > best_con) { best_con = con; best_x = af->ls.x; memcpy(bestc, mc, sizeof mc); }
+    }
+    if (af->ls.x != best_x) {
+        avl_stop_scan(s);
+        af->session = 0;
+        af->ls.x = best_x;
+    }
+    int ib = af_argmax(bestc, NC);
+    int16_t c = cpos[ib];
+    if (c > 180) c = 180;
+    if (c < -180) c = -180;
+    int16_t fpos[NF];
+    double mf[NF];
+    for (int k = 0; k < NF; k++) fpos[k] = (int16_t)(c + 20 - 5 * k);
+    if (!focus_scan(s, af, (int16_t)(fpos[0] + 50), 1, NULL)) return 0;
+    av_delay_ticks(6);
+    if (!af_sweep(s, af, fpos, NF, 2, mf, cb, ud, "autofocus (fine)")) return 0;
+    int jb = af_argmax(mf, NF);
+    double best = fpos[jb];
+    if (jb > 0 && jb < NF - 1 && mf[jb - 1] > 0 && mf[jb + 1] > 0) {
+        double a = log(mf[jb - 1]), b0 = log(mf[jb]), cc = log(mf[jb + 1]);
+        double den = a - 2 * b0 + cc;
+        /* vertex of the parabola; positions descend, so jb-1 is 5 above jb */
+        if (den < 0) best = fpos[jb] + 2.5 * (cc - a) / den;
+    }
+    int b = (int)lround(best);
+    if (b > 200) b = 200;
+    if (b < -200) b = -200;
+    if (!focus_scan(s, af, (int16_t)(b + 50), 1, NULL)) return 0;
+    av_delay_ticks(6);
+    if (!focus_scan(s, af, (int16_t)b, 1, NULL)) return 0;
+    dsd4_logf(s, 1, "autofocus: best position %d (contrast %.2f)", b, best_con);
+    *best_out = b;
+    return 1;
+}
+
 int dsd4_autofocus(dsd4 *s, const dsd4_scan_params *sp, int *best_out, dsd4_progress_fn cb, void *ud)
 {
     af_state af;
@@ -744,6 +879,13 @@ int dsd4_autofocus(dsd4 *s, const dsd4_scan_params *sp, int *best_out, dsd4_prog
     if (f > 7.0) f = 7.0;
     for (int c = 0; c < 3; c++) af.ls.exp[c] = af.ls.cap[c] = f * g[c];
     dsd4_logf(s, 2, "focus AE: max %u -> factor %.3f", mx, f);
+
+    if (sp->af_mode != DSD4_AF_CLASSIC) {
+        int b = 0;
+        if (!autofocus_fast(s, &af, a[0].w, &b, cb, ud)) { r = fail(s); goto out; }
+        if (best_out) *best_out = b;
+        goto out;
+    }
 
     const int16_t half = 200, lo_lim = -200; /* focus range 400 */
     uint32_t m, bestm = 0;
@@ -804,7 +946,7 @@ void dsd4_image_free(dsd4_image *img)
 }
 
 /* box downsample of 16-bit interleaved data by an arbitrary ratio */
-static uint8_t *resample16(const uint16_t *src, int sw, int sh, int ch, int dw, int dh)
+uint8_t *dsd4_resample16(const uint16_t *src, int sw, int sh, int ch, int dw, int dh)
 {
     uint16_t *dst = malloc((size_t)dw * dh * ch * 2);
     if (!dst) return NULL;
@@ -828,10 +970,36 @@ static uint8_t *resample16(const uint16_t *src, int sw, int sh, int ch, int dw, 
     return (uint8_t *)dst;
 }
 
+/* the same for float samples */
+static uint8_t *resample_f(const float *src, int sw, int sh, int ch, int dw, int dh)
+{
+    float *dst = malloc((size_t)dw * dh * ch * sizeof *dst);
+    if (!dst) return NULL;
+    const double fx = (double)sw / dw, fy = (double)sh / dh;
+    for (int y = 0; y < dh; y++) {
+        int y0 = (int)(y * fy), y1 = (int)((y + 1) * fy);
+        if (y1 <= y0) y1 = y0 + 1;
+        if (y1 > sh) y1 = sh;
+        for (int x = 0; x < dw; x++) {
+            int x0 = (int)(x * fx), x1 = (int)((x + 1) * fx);
+            if (x1 <= x0) x1 = x0 + 1;
+            if (x1 > sw) x1 = sw;
+            for (int c = 0; c < ch; c++) {
+                double sum = 0;
+                for (int yy = y0; yy < y1; yy++)
+                    for (int xx = x0; xx < x1; xx++) sum += src[((size_t)yy * sw + xx) * ch + c];
+                dst[((size_t)y * dw + x) * ch + c] = (float)(sum / ((double)(y1 - y0) * (x1 - x0)));
+            }
+        }
+    }
+    return (uint8_t *)dst;
+}
+
 int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progress_fn cb, void *ud)
 {
     memset(img, 0, sizeof *img);
-    if (sp->bits != 8 && sp->bits != 16) return DSD4_ERR_PARAM;
+    if (!sp->float_out && sp->bits != 8 && sp->bits != 16) return DSD4_ERR_PARAM;
+    const int fl = sp->float_out != 0;
     const int film = film_type_code(sp->film);
     const int gray = !is_color(film);
     line_setting ls;
@@ -903,6 +1071,7 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
         ls.exp[c] = sp->exposure[c] > 0 ? sp->exposure[c] : stdg[c];
     }
     ls.exp[3] = ls.cap[3] = 1.0;
+    ls.unlimited = sp->unlimited_exposure != 0;
 
     /* focus */
     int focus = sp->focus;
@@ -921,8 +1090,9 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
     if (cb) cb(ud, "preparing", -1);
     if (!scan_calibration_check(s)) return fail(s);
     if (!update_setup_data(s)) return fail(s);
-    double dg[3];
+    double dg[3], would[3];
     check_gain_limit(s, &ls, dg);
+    memcpy(would, dg, sizeof would);
     if (sp->raw) dg[0] = dg[1] = dg[2] = 1.0;
     dsd4_logf(s, 2, "exposure %.3f/%.3f/%.3f digital gain %.3f/%.3f/%.3f focus %d", ls.exp[0], ls.exp[1],
               ls.exp[2], dg[0], dg[1], dg[2], focus);
@@ -940,11 +1110,16 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
     }
 
     const int ch = gray ? 1 : 3;
-    const size_t stride = (size_t)w * ch * 2;
-    uint8_t *buf = malloc(stride * h);
+    const size_t ssz = fl ? sizeof(float) : 2;
+    const size_t stride = (size_t)w * ch * ssz;
+    /* research probe: the scanner returns yres/3200 times as many lines */
+    const uint32_t yr = s->probe_yres && scan_dpi == 3200 ? s->probe_yres : 3200;
+    const uint32_t hs = (uint32_t)((uint64_t)h * yr / 3200);
+    uint8_t *buf = malloc(stride * hs);
     if (!buf) return DSD4_ERR_NOMEM;
     progress pg = { cb, ud, sp->preview ? "preview" : "scanning" };
-    int scanned = line_scan(s, &ls, buf, stride, h, dg, &pg);
+    int scanned = line_scan(s, &ls, fl ? NULL : buf, fl ? (float *)buf : NULL, stride, hs, dg, &pg);
+    h = hs;
     int err = s->last_error;
     /* ScanExecution -> HomePosition: return the carriage after every scan */
     if (cb) cb(ud, "returning carriage", -1);
@@ -956,14 +1131,18 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
     }
 
     img->channels = ch;
-    img->bits = 16;
+    img->bits = fl ? 32 : 16;
     img->focus = focus;
-    for (int c = 0; c < 3; c++) img->digital_gain[c] = dg[c];
+    for (int c = 0; c < 3; c++) {
+        img->digital_gain[c] = dg[c];
+        img->raw_gain[c] = would[gray ? 0 : c];
+    }
     if (k != 1.0) {
         int dw = (int)(w / k), dh = (int)(h / k);
         if (dw < 1) dw = 1;
         if (dh < 1) dh = 1;
-        uint8_t *rs = resample16((uint16_t *)buf, (int)w, (int)h, ch, dw, dh);
+        uint8_t *rs = fl ? resample_f((float *)buf, (int)w, (int)h, ch, dw, dh)
+                         : dsd4_resample16((uint16_t *)buf, (int)w, (int)h, ch, dw, dh);
         free(buf);
         if (!rs) return DSD4_ERR_NOMEM;
         buf = rs;
@@ -972,9 +1151,9 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
     }
     if (crop) {
         /* trim the alignment padding so the result is exactly the requested size */
-        const size_t bpp = (size_t)ch * 2;
+        const size_t bpp = (size_t)ch * ssz;
         uint32_t ox = (uint32_t)((want_x - x) / k + 0.5);
-        uint32_t ow = (uint32_t)sp->w, oh = (uint32_t)sp->h;
+        uint32_t ow = (uint32_t)sp->w, oh = (uint32_t)((uint64_t)sp->h * yr / 3200);
         if (ox > w) ox = w;
         if (ow > w - ox) ow = w - ox;
         if (oh > h) oh = h;
@@ -988,9 +1167,9 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
     img->width = (int)w;
     img->height = (int)h;
     img->dpi = out_dpi;
-    img->stride = (size_t)w * ch * 2;
+    img->stride = (size_t)w * ch * ssz;
     img->data = buf;
-    if (sp->bits == 8) {
+    if (!fl && sp->bits == 8) {
         uint16_t *s16 = (uint16_t *)buf;
         size_t n = (size_t)w * h * ch;
         for (size_t i = 0; i < n; i++) buf[i] = (uint8_t)(s16[i] >> 8);

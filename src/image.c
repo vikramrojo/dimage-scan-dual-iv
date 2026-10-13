@@ -120,39 +120,50 @@ void dsd4_to_display(dsd4_image *im)
     im->stride = (size_t)im->width * im->channels;
 }
 
-/* Invert a colour negative: per-channel black/white points from the 0.1 % and
- * 99.9 % histogram tails (removes the orange mask), then invert. */
+/* Negative -> positive.  A negative records density, so the inversion works
+ * on log values: per channel the film base (the clearest film, including the
+ * orange mask) is the 99.5th percentile and the densest image area the 0.5th.
+ * Densities relative to the base are normalised to that range per channel,
+ * which removes the mask and the channels' different contrast, then mapped
+ * back to linear light over a 2.0 density (about 6.6 stop) range.
+ * auto_levels 0 uses the extreme values instead of percentiles. */
 void dsd4_invert_negative(dsd4_image *img, int auto_levels)
 {
+    if (img->bits != 8 && img->bits != 16) return;
     const int ch = img->channels;
     const size_t n = (size_t)img->width * img->height;
     const int max = img->bits == 16 ? 65535 : 255;
+    const double R = 2.0, lfloor = pow(10, -R);
+    uint32_t *hist = malloc(((size_t)max + 1) * sizeof *hist);
+    uint16_t *lut = malloc(((size_t)max + 1) * sizeof *lut);
+    if (!hist || !lut) { free(hist); free(lut); return; }
     for (int c = 0; c < ch; c++) {
+        memset(hist, 0, ((size_t)max + 1) * sizeof *hist);
+        for (size_t i = 0; i < n; i++)
+            hist[img->bits == 16 ? ((uint16_t *)img->data)[i * ch + c] : img->data[i * ch + c]]++;
+        const size_t tail = auto_levels ? n / 200 : 0;
+        size_t acc = 0;
         int lo = 0, hi = max;
-        if (auto_levels) {
-            uint32_t *hist = calloc((size_t)max + 1, sizeof *hist);
-            if (!hist) return;
-            for (size_t i = 0; i < n; i++) {
-                int v = img->bits == 16 ? ((uint16_t *)img->data)[i * ch + c] : img->data[i * ch + c];
-                hist[v]++;
-            }
-            size_t acc = 0, tail = n / 1000;
-            for (lo = 0; lo < max && acc + hist[lo] <= tail; lo++) acc += hist[lo];
-            acc = 0;
-            for (hi = max; hi > lo && acc + hist[hi] <= tail; hi--) acc += hist[hi];
-            free(hist);
-            if (hi <= lo) { lo = 0; hi = max; }
+        while (lo < max && acc + hist[lo] <= tail) acc += hist[lo++];
+        acc = 0;
+        while (hi > lo && acc + hist[hi] <= tail) acc += hist[hi--];
+        const double base = hi > 0 ? hi : 1, dense = lo > 0 ? lo : 0.5;
+        double dmax = log10(base / dense);
+        if (dmax < 0.05) dmax = 0.05;
+        for (int v = 0; v <= max; v++) {
+            double d = log10(base / (v > 0 ? v : 0.5)) / dmax;
+            d = d < 0 ? 0 : d > 1 ? 1 : d;
+            double l = (pow(10, R * (d - 1)) - lfloor) / (1 - lfloor);
+            lut[v] = (uint16_t)(l * max + 0.5);
         }
-        const double scale = (double)max / (hi - lo);
         for (size_t i = 0; i < n; i++) {
             size_t k = i * ch + c;
-            int v = img->bits == 16 ? ((uint16_t *)img->data)[k] : img->data[k];
-            double o = (hi - v) * scale;
-            int r = o < 0 ? 0 : o > max ? max : (int)(o + 0.5);
-            if (img->bits == 16) ((uint16_t *)img->data)[k] = (uint16_t)r;
-            else img->data[k] = (uint8_t)r;
+            if (img->bits == 16) ((uint16_t *)img->data)[k] = lut[((uint16_t *)img->data)[k]];
+            else img->data[k] = (uint8_t)lut[img->data[k]];
         }
     }
+    free(hist);
+    free(lut);
 }
 
 /* Minimal TIFF reader: one IFD, uncompressed, chunky, 8/16 bit, 1 or 3

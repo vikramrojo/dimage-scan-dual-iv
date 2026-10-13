@@ -735,6 +735,15 @@ int avl_set_scan_parameter(dsd4 *s, const sp_t *in)
         }
         p.yres = (uint16_t)r;
     }
+    if (s->probe_yres && p.mode > 1 && p.yres == s->ab.optical) {
+        /* research probe: a vertical resolution above the optical one, sent
+         * as is (the original clamps it and rescales on the host) */
+        p.lines = (uint16_t)((uint32_t)p.lines * s->probe_yres / p.yres);
+        s->req_lines = p.lines;
+        p.yres = s->probe_yres;
+        s->yscale = 0;
+        s->xsub = 1;
+    }
     if (s->b200) s->b202 = (uint16_t)(p.yres / (s->optical_res / s->b200));
     s->scan_lines = p.lines;
     if (s->caps & 0x10) { s->last_error = AVE_PARAM; return 0; } /* line packing: not on Dual IV */
@@ -759,6 +768,12 @@ int avl_set_scan_parameter(dsd4 *s, const sp_t *in)
             p.width = (uint16_t)((p.yres + (uint32_t)p.pixels * s->base_unit - 1) / p.yres);
         }
         if (in->pixels < p.pixels) s->xscale = 1;
+        if (s->probe_yres && p.yres == s->probe_yres) {
+            /* keep the horizontal sampling at the optical resolution */
+            p.xres = s->ab.optical;
+            p.pixels = (uint16_t)(align * ((in->pixels + (align - 1)) / align));
+            s->xscale = 0;
+        }
     }
     s->req_pixels = req_pixels;
     s->scan_line_bytes = (uint16_t)(((uint32_t)p.pixels * p.bits) >> 3);

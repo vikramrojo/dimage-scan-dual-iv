@@ -6,6 +6,7 @@
 #include "../src/escl.h"
 #include "version.h"
 
+#include <errno.h>
 #include <getopt.h>
 #include <math.h>
 #include <limits.h>
@@ -42,11 +43,15 @@ static void usage(void)
 "  focus <pos>               move the focus motor (-200..200)\n"
 "  autofocus [--frame n]     run the original autofocus sequence\n"
 "  preview -o file.tiff      800 dpi preview of the current/selected frame\n"
+"                            (negatives: --invert, or --minolta from one scan)\n"
 "  scan -o file.tiff         scan one frame\n"
 "  scan-all -o prefix        scan every frame of the holder (prefix-N.tiff)\n"
 "  convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n"
 "                            apply the original Minolta negative processing to\n"
 "                            an existing raw negative scan (no scanner needed)\n"
+"  research [nyquist|focus|jitter|yres|all] [--frame n] [--focus n] [-o dir]\n"
+"                            measure what multi-pass super-resolution could\n"
+"                            gain on this scanner (scans strips; -o saves DNGs)\n"
 "  serve [--port n] [--film type] [--local]\n"
 "                            AirScan server: makes the scanner available in\n"
 "                            Image Capture and Preview (settings page at /).\n"
@@ -80,6 +85,14 @@ static void usage(void)
 "  --minolta                 negatives: the original Minolta auto-exposure and\n"
 "                            film curves (prescan + positive result)\n"
 "  --raw                     no host-side digital gain\n"
+"  --format <tiff|dng>       dng: raw linear DNG for raw converters (Lightroom,\n"
+"                            darktable, Negative Lab Pro); implies --raw\n"
+"  --hdr[=ev]                DNG only: second pass ev stops brighter (default 2),\n"
+"                            aligned and merged for cleaner shadows\n"
+"  --dng-bits <half|32|16>   with multi-sampling or HDR: half (default) = 16-bit\n"
+"                            float DNG (Lightroom, macOS); 32 = 32-bit float\n"
+"                            (darktable, RawTherapee); 16 = 16-bit integer\n"
+"  --af <fast|classic>       autofocus: fast (default) or the original sequence\n"
 "  --flip-x / --flip-y       mirror the image\n"
 "  --rotate <90|180|270>     rotate clockwise\n");
 }
@@ -285,6 +298,9 @@ typedef struct {
     int display;      /* 8-bit sRGB-like gamma output for viewing */
     int minolta;      /* negatives: original Minolta processing */
     int no_profile;   /* do not embed the scanner profile */
+    int dng;          /* raw DNG output */
+    double hdr_ev;    /* > 0: HDR second pass (DNG) */
+    int dng_bits;     /* float DNG sample size: 0/half = 16-bit float, 32, or 16 = integer only */
 } scan_opts;
 
 static int parse_scan_opts(int argc, char **argv, scan_opts *o)
@@ -294,6 +310,7 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
         { "exposure", 1, 0, 'e' }, { "ev", 1, 0, 'E' }, { "focus", 1, 0, 'c' }, { "area", 1, 0, 'a' },
         { "samples", 1, 0, 's' }, { "invert", 0, 0, 'i' }, { "raw", 0, 0, 'r' }, { "flip-x", 0, 0, 'X' },
         { "flip-y", 0, 0, 'Y' }, { "rotate", 1, 0, 'R' }, { "output", 1, 0, 'o' }, { "minolta", 0, 0, 'M' },
+        { "format", 1, 0, 'T' }, { "hdr", 2, 0, 'H' }, { "dng-bits", 1, 0, 'B' }, { "af", 1, 0, 'A' },
         { 0, 0, 0, 0 },
     };
     optind = 1;
@@ -332,6 +349,25 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
         case 'R': o->rot = atoi(optarg); break;
         case 'o': o->out = optarg; break;
         case 'M': o->minolta = 1; break;
+        case 'T':
+            if (!strcmp(optarg, "dng")) o->dng = 1;
+            else if (!strcmp(optarg, "tiff")) o->dng = 0;
+            else { fprintf(stderr, "bad format %s (tiff or dng)\n", optarg); return -1; }
+            break;
+        case 'H':
+            o->hdr_ev = optarg ? atof(optarg) : 2.0;
+            if (!(o->hdr_ev > 0 && o->hdr_ev <= 6)) { fprintf(stderr, "bad HDR stops %s\n", optarg); return -1; }
+            break;
+        case 'B':
+            if (!strcmp(optarg, "half")) o->dng_bits = 0;
+            else if (!strcmp(optarg, "32") || !strcmp(optarg, "16")) o->dng_bits = atoi(optarg);
+            else { fprintf(stderr, "bad DNG sample size %s (half, 32 or 16)\n", optarg); return -1; }
+            break;
+        case 'A':
+            if (!strcmp(optarg, "fast")) o->p.af_mode = DSD4_AF_FAST;
+            else if (!strcmp(optarg, "classic")) o->p.af_mode = DSD4_AF_CLASSIC;
+            else { fprintf(stderr, "bad autofocus mode %s (fast or classic)\n", optarg); return -1; }
+            break;
         default: return -1;
         }
     }
@@ -351,18 +387,41 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     }
     dsd4_image im;
     dsd4_minolta_info mi;
-    const int minolta = o->minolta && !p.preview &&
-                        (p.film == DSD4_FILM_NEGATIVE_COLOR || p.film == DSD4_FILM_NEGATIVE_BW);
-    int r = minolta ? dsd4_scan_minolta(s, &p, &im, &mi, on_progress, NULL)
-                    : dsd4_scan(s, &p, &im, on_progress, NULL);
+    const int negative = p.film == DSD4_FILM_NEGATIVE_COLOR || p.film == DSD4_FILM_NEGATIVE_BW;
+    const int dng = o->dng && !p.preview;
+    if (o->hdr_ev > 0 && !dng) {
+        fprintf(stderr, "dsdual4: HDR needs raw output (--format dng)\n");
+        return 1;
+    }
+    /* DNG is the scanner's raw data: no inversion, curves or display conversion */
+    const int minolta = o->minolta && negative && !dng;
+    const int invert = o->invert && !dng;
+    if (dng) {
+        p.raw = 1;
+        p.float_out = o->dng_bits != 16 && (p.multi_sample > 1 || o->hdr_ev > 0);
+    }
+    dsd4_hdr_info hi;
+    int r;
+    if (o->hdr_ev > 0) r = dsd4_scan_hdr(s, &p, o->hdr_ev, &im, &hi, on_progress, NULL);
+    else if (minolta && p.preview) r = dsd4_preview_minolta(s, &p, &im, &mi, on_progress, NULL);
+    else if (minolta) r = dsd4_scan_minolta(s, &p, &im, &mi, on_progress, NULL);
+    else r = dsd4_scan(s, &p, &im, on_progress, NULL);
     done_progress();
     if (check(r, s, p.preview ? "preview" : "scan")) return 1;
     if (minolta && g_verbose >= 1)
         fprintf(stderr, "Minolta processing: AE exposure %.3f/%.3f/%.3f, black level %d/%d/%d\n", mi.exposure[0],
                 mi.exposure[1], mi.exposure[2], mi.black_level[0], mi.black_level[1], mi.black_level[2]);
     g_last_focus = im.focus;
-    if (o->invert && !minolta) dsd4_invert_negative(&im, 1);
-    if (o->display) dsd4_to_display(&im);
+    if (invert && !minolta) dsd4_invert_negative(&im, 1);
+    if (o->display && minolta && im.bits == 16) {
+        /* already gamma-encoded by the film curves (Nega Input): just 8 bit */
+        size_t n = (size_t)im.width * im.height * im.channels;
+        for (size_t i = 0; i < n; i++) im.data[i] = (uint8_t)(((uint16_t *)im.data)[i] >> 8);
+        im.bits = 8;
+        im.stride = (size_t)im.width * im.channels;
+    } else if (o->display && !dng) {
+        dsd4_to_display(&im);
+    }
     if (o->fx) flip_x(&im);
     if (o->fy) flip_y(&im);
     if (o->rot == 90 || o->rot == 180 || o->rot == 270) {
@@ -376,21 +435,26 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     /* slides: Posi Linear profile; Minolta-processed colour negatives: Nega Input */
     const uint8_t *icc = NULL;
     size_t icc_len = 0;
-    if (!o->no_profile && !o->display && im.channels == 3) {
-        if (p.film == DSD4_FILM_POSITIVE_COLOR && !o->invert) { icc = g_icc; icc_len = g_icc_len; }
+    if (!dng && !o->no_profile && im.channels == 3) {
+        if (p.film == DSD4_FILM_POSITIVE_COLOR && !invert && !o->display) { icc = g_icc; icc_len = g_icc_len; }
         else if (minolta) { icc = g_icc_n; icc_len = g_icc_n_len; }
     }
     const int embed = icc != NULL;
-    r = dsd4_write_tiff_icc(&im, path, icc, icc_len);
+    r = dng ? dsd4_write_dng(&im, path, o->dng_bits == 16 ? 0 : o->dng_bits == 32 ? 32 : 16, g_icc, g_icc_len)
+            : dsd4_write_tiff_icc(&im, path, icc, icc_len);
     if (r != DSD4_OK) {
         fprintf(stderr, "dsdual4: cannot write %s\n", path);
         dsd4_image_free(&im);
         return 1;
     }
+    const char *depth = im.bits == 8 ? "8-bit" : im.bits == 16 ? "16-bit"
+                      : o->dng_bits == 32 ? "32-bit float" : o->dng_bits == 16 ? "16-bit" : "16-bit float";
     if (g_verbose >= 1)
-        fprintf(stderr, "wrote %s: %dx%d, %d-bit %s, %d dpi, focus %d, digital gain %.2f/%.2f/%.2f%s\n",
-                path, im.width, im.height, im.bits, im.channels == 3 ? "RGB" : "gray", im.dpi, im.focus,
-                im.digital_gain[0], im.digital_gain[1], im.digital_gain[2],
+        fprintf(stderr, "wrote %s: %dx%d, %s %s, %d dpi, focus %d, %s %.2f/%.2f/%.2f%s\n",
+                path, im.width, im.height, depth, im.channels == 3 ? "RGB" : "gray",
+                im.dpi, im.focus, dng ? "raw DNG, white balance" : "digital gain",
+                dng ? im.raw_gain[0] : im.digital_gain[0], dng ? im.raw_gain[1] : im.digital_gain[1],
+                dng ? im.raw_gain[2] : im.digital_gain[2],
                 embed ? (minolta ? ", Nega Input profile embedded" : ", scanner profile embedded") : "");
     dsd4_image_free(&im);
     return 0;
@@ -470,7 +534,7 @@ enum { NEG_RAW = 0, NEG_INVERT = 1, NEG_MINOLTA = 2 };
 typedef struct {
     int dpi;        /* 100..800 */
     int autofocus;  /* 1: autofocus every preview, 0: reuse the last focus */
-    int neg_raw;    /* negatives: 0 simple invert, 1 show the raw negative */
+    int neg;        /* negatives: NEG_RAW, NEG_INVERT or NEG_MINOLTA */
 } preview_cfg;
 static const char *neg_mode_name(int m)
 {
@@ -506,8 +570,13 @@ static void scan_settings(scan_opts *c, int *neg_mode)
         printf("    1  Film type     %s\n", film_name(c->p.film));
         printf("    2  Size          %s\n", area);
         printf("    3  Resolution    %d dpi\n", c->p.dpi);
-        if (is_negative(c->p.film)) printf("    4  Negatives     %s\n", neg_mode_name(*neg_mode));
+        if (c->dng) printf("    %s4  Negatives     (DNG is raw: invert in your raw converter)%s\n", C("2"), C("0"));
+        else if (is_negative(c->p.film)) printf("    4  Negatives     %s\n", neg_mode_name(*neg_mode));
         else printf("    %s4  Negatives     (only for negative film)%s\n", C("2"), C("0"));
+        printf("    5  Output        %s\n", c->dng ? "DNG raw (for Lightroom, darktable, Negative Lab Pro)"
+                                                    : "TIFF (processed)");
+        if (c->dng) printf("    6  HDR           %s\n", c->hdr_ev > 0 ? "on: second pass +2 EV, merged" : "off");
+        else printf("    %s6  HDR           (DNG output only)%s\n", C("2"), C("0"));
         char b[64];
         if (ask("  Change which (Enter = done)? ", b, sizeof b) < 0 || !*b) return;
         switch (b[0]) {
@@ -543,6 +612,21 @@ static void scan_settings(scan_opts *c, int *neg_mode)
                    "      curves (needs a prescan; tagged with the Nega Input profile)\n");
             *neg_mode = ask_int("    Negatives", *neg_mode + 1, 1, 3) - 1;
             break;
+        case '5':
+            printf("    1 TIFF - processed 16-bit (or display-ready) TIFF, negatives handled as above\n"
+                   "    2 DNG raw - the scanner's linear data with Konica Minolta's colour\n"
+                   "      calibration, for raw converters; multi-sampling or HDR give a\n"
+                   "      32-bit float DNG with the extra precision\n");
+            c->dng = ask_int("    Output", c->dng + 1, 1, 2) == 2;
+            if (!c->dng) c->hdr_ev = 0;
+            break;
+        case '6':
+            if (!c->dng) { printf("    Choose DNG output first.\n"); break; }
+            printf("    HDR scans each frame twice, the second time 2 stops brighter, aligns\n"
+                   "    the passes and merges them: about 2 stops more clean shadow detail\n"
+                   "    (dense slides, negative shadows). Takes twice as long.\n");
+            c->hdr_ev = ask_int("    HDR: 1 = on, 0 = off", c->hdr_ev > 0, 0, 1) ? 2.0 : 0;
+            break;
         default:
             printf("    unknown choice\n");
         }
@@ -555,7 +639,7 @@ static void preview_settings(preview_cfg *pv)
         printf("\n    %sPreview%s\n", C("1"), C("0"));
         printf("      1  Resolution  %d dpi%s\n", pv->dpi, pv->dpi < 800 ? " (faster)" : "");
         printf("      2  Focus       %s\n", pv->autofocus ? "autofocus every preview" : "skip autofocus (reuse last focus)");
-        printf("      3  Negatives   %s\n", pv->neg_raw ? "show the raw negative" : "simple invert");
+        printf("      3  Negatives   %s\n", neg_mode_name(pv->neg));
         char b[32];
         if (ask("    Change which (Enter = back)? ", b, sizeof b) < 0 || !*b) return;
         switch (b[0]) {
@@ -567,7 +651,11 @@ static void preview_settings(preview_cfg *pv)
             break;
         }
         case '2': pv->autofocus = ask_int("      1 = autofocus, 0 = skip", pv->autofocus, 0, 1); break;
-        case '3': pv->neg_raw = ask_int("      Negatives: 0 = simple invert, 1 = raw", pv->neg_raw, 0, 1); break;
+        case '3':
+            printf("      1 raw negative  2 simple invert  3 Minolta processing (one 800 dpi\n"
+                   "      scan; a following Minolta scan of the frame reuses its exposure)\n");
+            pv->neg = ask_int("      Negatives", pv->neg + 1, 1, 3) - 1;
+            break;
         default: printf("      unknown choice\n");
         }
     }
@@ -588,8 +676,11 @@ static void device_settings(scan_opts *c, int *display, int *open_after, int *us
         printf("    5  Open in Preview  %s\n", *open_after ? "after every scan" : "previews only");
         printf("    6  Output folder    %s\n", outdir);
         printf("    7  Colour profile   %s\n", !g_icc ? "not found" : *use_profile ? "embed scanner profile" : "off");
+        static const char *pn[] = { "raw", "simple invert", "Minolta" };
         printf("    8  Preview          %d dpi, %s, negatives %s\n", pv->dpi, pv->autofocus ? "autofocus" : "no autofocus",
-               pv->neg_raw ? "raw" : "inverted");
+               pn[pv->neg]);
+        printf("    9  Autofocus        %s\n", c->p.af_mode == DSD4_AF_CLASSIC ? "classic (original sequence)"
+                                                                              : "fast (about 3x quicker)");
         char b[PATH_MAX];
         if (ask("  Change which (Enter = done)? ", b, sizeof b) < 0 || !*b) return;
         switch (b[0]) {
@@ -617,6 +708,10 @@ static void device_settings(scan_opts *c, int *display, int *open_after, int *us
             break;
         case '8':
             preview_settings(pv);
+            break;
+        case '9':
+            c->p.af_mode = ask_int("    Autofocus: 0 = fast, 1 = classic (the original software's sequence)",
+                                   c->p.af_mode == DSD4_AF_CLASSIC, 0, 1) ? DSD4_AF_CLASSIC : DSD4_AF_FAST;
             break;
         case '7':
             if (!g_icc) printf("    No profile found (see --profile).\n");
@@ -656,9 +751,12 @@ static void save_settings(const menu_state *m)
     if (!f) return;
     const dsd4_scan_params *p = &m->cfg->p;
     fprintf(f, "film=%d\ndpi=%d\narea=%d,%d,%d,%d\nnegatives=%d\nfocus=%d\nsamples=%d\ndisplay=%d\n"
-               "flip=%d\nopen_after=%d\nprofile=%d\npreview_dpi=%d\npreview_af=%d\npreview_neg_raw=%d\noutdir=%s\n",
+               "flip=%d\nopen_after=%d\nprofile=%d\npreview_dpi=%d\npreview_af=%d\npreview_neg=%d\n"
+               "format=%s\nhdr=%d\naf=%s\noutdir=%s\n",
             (int)p->film, p->dpi, p->x, p->y, p->w, p->h, *m->neg_mode, p->focus, p->multi_sample, *m->display,
-            m->cfg->fx, *m->open_after, *m->use_profile, m->pv->dpi, m->pv->autofocus, m->pv->neg_raw, m->outdir);
+            m->cfg->fx, *m->open_after, *m->use_profile, m->pv->dpi, m->pv->autofocus, m->pv->neg,
+            m->cfg->dng ? "dng" : "tiff", m->cfg->hdr_ev > 0, p->af_mode == DSD4_AF_CLASSIC ? "classic" : "fast",
+            m->outdir);
     fclose(f);
 }
 
@@ -687,7 +785,11 @@ static void load_settings(menu_state *m)
         else if (!strcmp(line, "profile")) *m->use_profile = i != 0 && g_icc;
         else if (!strcmp(line, "preview_dpi") && i >= 50 && i <= 800) m->pv->dpi = i;
         else if (!strcmp(line, "preview_af")) m->pv->autofocus = i != 0;
-        else if (!strcmp(line, "preview_neg_raw")) m->pv->neg_raw = i != 0;
+        else if (!strcmp(line, "preview_neg_raw")) m->pv->neg = i ? NEG_RAW : NEG_MINOLTA; /* older files */
+        else if (!strcmp(line, "preview_neg") && i >= 0 && i <= 2) m->pv->neg = i;
+        else if (!strcmp(line, "format")) m->cfg->dng = !strcmp(v, "dng");
+        else if (!strcmp(line, "hdr")) m->cfg->hdr_ev = i ? 2.0 : 0;
+        else if (!strcmp(line, "af")) p->af_mode = !strcmp(v, "classic") ? DSD4_AF_CLASSIC : DSD4_AF_FAST;
         else if (!strcmp(line, "outdir") && *v) snprintf(m->outdir, m->outlen, "%s", v);
     }
     fclose(f);
@@ -704,7 +806,7 @@ static int run_menu(dsd4 *s, int fw_check)
     cfg.p.dpi = 3200;
     int display_scans = 0, open_after = 1, initialized = 0;
     int neg_mode = NEG_INVERT, use_profile = g_icc != NULL;
-    preview_cfg pv = { 800, 1, 0 };
+    preview_cfg pv = { 800, 1, NEG_MINOLTA };
     menu_state ms = { &cfg, &neg_mode, &display_scans, &open_after, &use_profile, &pv, outdir, sizeof outdir };
     load_settings(&ms);
     char last[PATH_MAX] = "";
@@ -736,8 +838,12 @@ static int run_menu(dsd4 *s, int fw_check)
         {
             char area[64];
             area_text(&cfg, area, sizeof area);
-            printf(" Scan       %s, %s, %d dpi%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
-                   is_negative(cfg.p.film) ? ", " : "", is_negative(cfg.p.film) ? neg_mode_name(neg_mode) : "");
+            if (cfg.dng)
+                printf(" Scan       %s, %s, %d dpi, DNG raw%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
+                       cfg.hdr_ev > 0 ? " + HDR" : "");
+            else
+                printf(" Scan       %s, %s, %d dpi%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
+                       is_negative(cfg.p.film) ? ", " : "", is_negative(cfg.p.film) ? neg_mode_name(neg_mode) : "");
             printf(" Device     focus %s, %s, %s\n", cfg.p.focus == DSD4_FOCUS_AUTO ? "auto" : "manual",
                    display_scans ? "display-ready 8-bit" : "16-bit linear",
                    use_profile && g_icc ? "profile embedded" : "no profile");
@@ -846,14 +952,17 @@ static int run_menu(dsd4 *s, int fw_check)
             o.no_profile = !use_profile;
             if (key == 'p') {
                 o.p.dpi = pv.dpi;
-                o.minolta = 0; /* the Minolta pipeline is for full scans */
-                o.invert = is_negative(o.p.film) && !pv.neg_raw;
+                o.dng = 0;
+                o.hdr_ev = 0;
+                o.minolta = is_negative(o.p.film) && pv.neg == NEG_MINOLTA; /* one 800 dpi scan */
+                o.invert = is_negative(o.p.film) && pv.neg == NEG_INVERT;
                 if (!pv.autofocus)
                     o.p.focus = g_last_focus != DSD4_FOCUS_AUTO ? g_last_focus
                               : cfg.p.focus != DSD4_FOCUS_AUTO ? cfg.p.focus : 0;
             }
             char path[PATH_MAX];
-            snprintf(path, sizeof path, "%s/%s-frame%d-%s.tiff", outdir, key == 'p' ? "preview" : "scan", fr, stamp);
+            snprintf(path, sizeof path, "%s/%s-frame%d-%s.%s", outdir, key == 'p' ? "preview" : "scan", fr, stamp,
+                     o.dng ? "dng" : "tiff");
             if (do_scan(s, &o, path) == 0) {
                 snprintf(last, sizeof last, "%s", path);
                 if (key == 'p' || open_after) open_in_preview(path);
@@ -868,7 +977,7 @@ static int run_menu(dsd4 *s, int fw_check)
                 apply_neg_mode(&o, neg_mode);
             o.no_profile = !use_profile;
                 char path[PATH_MAX];
-                snprintf(path, sizeof path, "%s/scan-frame%d-%s.tiff", outdir, fr, stamp);
+                snprintf(path, sizeof path, "%s/scan-frame%d-%s.%s", outdir, fr, stamp, o.dng ? "dng" : "tiff");
                 printf("  frame %d of %d\n", fr, h.frames);
                 if (do_scan(s, &o, path)) break;
                 snprintf(last, sizeof last, "%s", path);
@@ -1162,12 +1271,27 @@ int main(int argc, char **argv)
             if (!(rc = check(dsd4_get_holder(s, &h), s, "holder"))) {
                 for (int f = 1; f <= h.frames && !rc; f++) {
                     char path[PATH_MAX];
-                    snprintf(path, sizeof path, "%s-%d.tiff", o.out, f);
+                    snprintf(path, sizeof path, "%s-%d.%s", o.out, f, o.dng ? "dng" : "tiff");
                     o.p.frame = f;
                     if (g_verbose >= 1) fprintf(stderr, "frame %d/%d\n", f, h.frames);
                     rc = do_scan(s, &o, path);
                 }
             }
+        }
+    } else if (!strcmp(cmd, "research")) {
+        scan_opts o = { 0 };
+        dsd4_default_params(&o.p);
+        const char *which = "all";
+        int k = 1;
+        if (cargc > 1 && cargv[1][0] != '-') { which = cargv[1]; k = 2; }
+        static const char *tests[] = { "nyquist", "focus", "jitter", "yres", "all" };
+        int known = 0;
+        for (int i = 0; i < 5; i++) known |= !strcmp(which, tests[i]);
+        if (!known || parse_scan_opts(cargc - k + 1, cargv + k - 1, &o)) { usage(); rc = 2; }
+        else if (o.out && mkdir(o.out, 0755) && errno != EEXIST) { perror(o.out); rc = 1; }
+        else if (!(rc = check(dsd4_initialize(s, fw_check, on_progress, NULL), s, "initialize"))) {
+            rc = check(dsd4_research(s, &o.p, which, o.out, stdout, on_progress, NULL), s, "research");
+            done_progress();
         }
     } else if (!strcmp(cmd, "serve")) {
         rc = cmd_serve(s, fw_check, cargc, cargv);

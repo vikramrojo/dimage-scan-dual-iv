@@ -242,6 +242,18 @@ struct dsd4 {
     int      firmware_checked;
     uint8_t  inquiry[96];
     char     firmware_path[1024];
+
+    /* research hooks (src/research.c) */
+    uint16_t probe_yres;      /* != 0: send this vertical resolution unchanged */
+    float *dbg_var;           /* != NULL: per-sample variance of multi-sample copies */
+
+    /* Minolta preview: AE result of the last previewed frame */
+    struct {
+        int valid, frame, film, holder;
+        double gain[3];
+        int black[3];
+        uint16_t *tab;        /* 3 x 65536 final film curves */
+    } ae_cache;
 };
 
 /* avision.c */
@@ -281,6 +293,12 @@ int  avl_set_gamma_table(dsd4 *s, const uint8_t *table, uint8_t channel, uint32_
 int  avl_download_firmware(dsd4 *s, const char *path, int *downloaded);
 void avl_temp_scan_parameter(dsd4 *s, sp_t *p);
 uint16_t avl_get_acc_table(dsd4 *s, const uint8_t req[24]); /* returns table length */
+
+/* scanner.c */
+uint8_t *dsd4_resample16(const uint16_t *src, int sw, int sh, int ch, int dw, int dh);
+
+/* merge.c: mean of n samples (stride apart), rejecting outliers from n >= 4 */
+double dsd4_robust_mean16(const uint16_t *v, unsigned n, size_t stride);
 
 /* calib.c */
 uint16_t cal_bubble_average(uint16_t *v, unsigned n);

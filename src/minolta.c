@@ -136,6 +136,127 @@ static void to8(dsd4_image *img)
     img->stride = (size_t)img->width * img->channels;
 }
 
+/* the frame under the lens, or -1 */
+static int current_frame(dsd4 *s)
+{
+    dsd4_holder_info h;
+    return dsd4_get_holder(s, &h) == DSD4_OK ? h.current_frame : -1;
+}
+
+/* remember an AE result for the current frame (Minolta preview -> scan) */
+static void cache_store(dsd4 *s, int frame, dsd4_film film, const double gain[3], const mfs_ae_result *ae,
+                        uint16_t *const tab[3])
+{
+    if (!s->ae_cache.tab) s->ae_cache.tab = malloc((size_t)3 * 65536 * sizeof *s->ae_cache.tab);
+    if (!s->ae_cache.tab || frame < 0) { s->ae_cache.valid = 0; return; }
+    for (int c = 0; c < 3; c++) {
+        memcpy(s->ae_cache.tab + (size_t)c * 65536, tab[c], 65536 * sizeof *s->ae_cache.tab);
+        s->ae_cache.gain[c] = gain[c];
+        s->ae_cache.black[c] = ae->ch[c].dark;
+    }
+    s->ae_cache.frame = frame;
+    s->ae_cache.film = (int)film;
+    s->ae_cache.holder = s->holder_type;
+    s->ae_cache.valid = 1;
+}
+
+static int cache_hit(dsd4 *s, int frame, dsd4_film film)
+{
+    return s->ae_cache.valid && frame >= 0 && s->ae_cache.frame == frame && s->ae_cache.film == (int)film &&
+           s->ae_cache.holder == s->holder_type;
+}
+
+/* AE prescan parameters: preview mode, 800 dpi, 16 bit, whole frame, AE base exposure */
+static dsd4_scan_params prescan_params(const dsd4_scan_params *p)
+{
+    dsd4_scan_params pre = *p;
+    pre.preview = 1;
+    pre.dpi = 800;
+    pre.bits = 16;
+    pre.raw = 0;
+    pre.float_out = 0;
+    pre.multi_sample = 1;
+    pre.x = pre.y = pre.w = pre.h = 0;
+    double base[3];
+    ae_base_gain(p->film, base);
+    for (int c = 0; c < 3; c++) pre.exposure[c] = base[c];
+    return pre;
+}
+
+int dsd4_preview_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_minolta_info *info,
+                         dsd4_progress_fn cb, void *ud)
+{
+    memset(img, 0, sizeof *img);
+    if (info) memset(info, 0, sizeof *info);
+    if (sp->film != DSD4_FILM_NEGATIVE_COLOR && sp->film != DSD4_FILM_NEGATIVE_BW) return DSD4_ERR_PARAM;
+    const int color = sp->film == DSD4_FILM_NEGATIVE_COLOR;
+    dsd4_scan_params p = *sp;
+    int r;
+    if (p.frame > 0) {
+        if (cb) cb(ud, "moving to frame", -1);
+        if ((r = dsd4_select_frame(s, p.frame))) return r;
+        p.frame = 0;
+    }
+    if (p.focus == DSD4_FOCUS_AUTO) {
+        int best = 0;
+        if ((r = dsd4_autofocus(s, &p, &best, cb, ud))) return r;
+        p.focus = best;
+    }
+    dsd4_scan_params pre = prescan_params(&p);
+    if (cb) cb(ud, "preview (Minolta processing)", -1);
+    if ((r = dsd4_scan(s, &pre, img, cb, ud))) return r;
+
+    uint16_t *tabs = malloc((size_t)6 * 65536 * sizeof *tabs);
+    if (!tabs) { dsd4_image_free(img); return DSD4_ERR_NOMEM; }
+    uint16_t *final_tab[3] = { tabs + 3 * 65536, tabs + 4 * 65536, tabs + 5 * 65536 };
+    double gain[3], base[3];
+    mfs_ae_result ae;
+    r = ae_and_curves((const uint16_t (*)[SHD_W])s->dark, (const uint16_t (*)[SHD_W])s->white,
+                      s->holder_type == 1, img, color, gain, final_tab, tabs, &ae);
+    if (r) {
+        free(tabs);
+        dsd4_image_free(img);
+        return r == DSD4_ERR_NOMEM ? r : DSD4_ERR_SCANNER;
+    }
+    cache_store(s, current_frame(s), p.film, gain, &ae, final_tab);
+    /* the final scan would be exposed at 'gain': scale the prescan likewise
+     * (the response is linear), then the film curves */
+    ae_base_gain(p.film, base);
+    const int ch = img->channels;
+    const size_t n = (size_t)img->width * img->height;
+    uint16_t *px = (uint16_t *)img->data;
+    for (int c = 0; c < ch; c++) {
+        const double k = gain[color ? c : 0] / base[color ? c : 1];
+        for (size_t i = 0; i < n; i++) {
+            double v = px[i * ch + c] * k;
+            px[i * ch + c] = final_tab[c][(uint16_t)(v > 65535 ? 65535 : v + 0.5)];
+        }
+    }
+    free(tabs);
+    if (sp->dpi > 0 && sp->dpi < 800) {
+        int dw = img->width * sp->dpi / 800, dh = img->height * sp->dpi / 800;
+        uint8_t *rs = dsd4_resample16(px, img->width, img->height, ch, dw > 0 ? dw : 1, dh > 0 ? dh : 1);
+        if (rs) {
+            free(img->data);
+            img->data = rs;
+            img->width = dw > 0 ? dw : 1;
+            img->height = dh > 0 ? dh : 1;
+            img->stride = (size_t)img->width * ch * 2;
+            img->dpi = sp->dpi;
+        }
+    }
+    if (sp->bits == 8) to8(img);
+    dsd4_logf(s, 1, "Minolta AE: exposure %.3f/%.3f/%.3f", gain[0], gain[1], gain[2]);
+    if (info) {
+        for (int c = 0; c < 3; c++) {
+            info->exposure[c] = gain[c];
+            info->black_level[c] = ae.ch[c].dark;
+        }
+        info->focus = p.focus;
+    }
+    return DSD4_OK;
+}
+
 int dsd4_scan_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_minolta_info *info,
                       dsd4_progress_fn cb, void *ud)
 {
@@ -158,42 +279,49 @@ int dsd4_scan_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4
         p.focus = best;
     }
 
-    /* 2. AE prescan */
-    dsd4_scan_params pre = p;
-    pre.preview = 1;
-    pre.dpi = 800;
-    pre.bits = 16;
-    pre.raw = 0;
-    pre.multi_sample = 1;
-    pre.x = pre.y = pre.w = pre.h = 0;
-    double base[3];
-    ae_base_gain(p.film, base);
-    for (int c = 0; c < 3; c++) pre.exposure[c] = base[c];
-    if (cb) cb(ud, "Minolta auto-exposure prescan", -1);
-    dsd4_image pim;
-    if ((r = dsd4_scan(s, &pre, &pim, cb, ud))) return r;
-
-    /* 3.-5. AE analysis and film curves */
     uint16_t *tabs = malloc((size_t)6 * 65536 * sizeof *tabs);
-    if (!tabs) { dsd4_image_free(&pim); return DSD4_ERR_NOMEM; }
+    if (!tabs) return DSD4_ERR_NOMEM;
     uint16_t *final_tab[3] = { tabs + 3 * 65536, tabs + 4 * 65536, tabs + 5 * 65536 };
     double gain[3];
-    mfs_ae_result ae;
-    r = ae_and_curves((const uint16_t (*)[SHD_W])s->dark, (const uint16_t (*)[SHD_W])s->white,
-                      s->holder_type == 1, &pim, color, gain, final_tab, tabs, &ae);
-    dsd4_image_free(&pim);
-    if (r) {
-        free(tabs);
-        dsd4_logf(s, 1, "Minolta auto-exposure / film curve computation failed");
-        s->last_error = AVE_GENERIC;
-        return r == DSD4_ERR_NOMEM ? r : DSD4_ERR_SCANNER;
+    int black[3];
+    const int frame = current_frame(s);
+    if (cache_hit(s, frame, p.film)) {
+        /* a Minolta preview of this frame already ran the AE prescan */
+        for (int c = 0; c < 3; c++) {
+            memcpy(final_tab[c], s->ae_cache.tab + (size_t)c * 65536, 65536 * sizeof *tabs);
+            gain[c] = s->ae_cache.gain[c];
+            black[c] = s->ae_cache.black[c];
+        }
+        dsd4_logf(s, 1, "Minolta AE: exposure %.3f/%.3f/%.3f (from the preview)", gain[0], gain[1], gain[2]);
+    } else {
+        /* 2. AE prescan */
+        dsd4_scan_params pre = prescan_params(&p);
+        if (cb) cb(ud, "Minolta auto-exposure prescan", -1);
+        dsd4_image pim;
+        if ((r = dsd4_scan(s, &pre, &pim, cb, ud))) { free(tabs); return r; }
+
+        /* 3.-5. AE analysis and film curves */
+        mfs_ae_result ae;
+        r = ae_and_curves((const uint16_t (*)[SHD_W])s->dark, (const uint16_t (*)[SHD_W])s->white,
+                          s->holder_type == 1, &pim, color, gain, final_tab, tabs, &ae);
+        dsd4_image_free(&pim);
+        if (r) {
+            free(tabs);
+            dsd4_logf(s, 1, "Minolta auto-exposure / film curve computation failed");
+            s->last_error = AVE_GENERIC;
+            return r == DSD4_ERR_NOMEM ? r : DSD4_ERR_SCANNER;
+        }
+        for (int c = 0; c < 3; c++) black[c] = ae.ch[c].dark;
+        cache_store(s, frame, p.film, gain, &ae, final_tab);
+        dsd4_logf(s, 1, "Minolta AE: exposure %.3f/%.3f/%.3f", gain[0], gain[1], gain[2]);
     }
-    dsd4_logf(s, 1, "Minolta AE: exposure %.3f/%.3f/%.3f", gain[0], gain[1], gain[2]);
 
     /* 6. final scan at the AE exposure, then the film curves */
     dsd4_scan_params fp = p;
     fp.preview = 0;
     fp.bits = 16;
+    fp.float_out = 0;
+    fp.raw = 0;
     for (int c = 0; c < 3; c++) fp.exposure[c] = gain[c];
     if ((r = dsd4_scan(s, &fp, img, cb, ud))) { free(tabs); return r; }
     if (cb) cb(ud, "applying film curves", -1);
@@ -203,9 +331,7 @@ int dsd4_scan_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4
     if (info) {
         for (int c = 0; c < 3; c++) info->exposure[c] = gain[c];
         info->focus = p.focus;
-        info->black_level[0] = ae.ch[0].dark;
-        info->black_level[1] = ae.ch[1].dark;
-        info->black_level[2] = ae.ch[2].dark;
+        for (int c = 0; c < 3; c++) info->black_level[c] = black[c];
     }
     return DSD4_OK;
 }
@@ -243,7 +369,7 @@ int dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_e
     ae_base_gain(film, base);
     const int ich = in->channels, och = color ? 3 : 1;
     const int k = in->dpi > 800 ? (in->dpi + 400) / 800 : 1;
-    dsd4_image pim = { in->width / k, in->height / k, och, 16, 800, 0, NULL, { 1, 1, 1 }, 0 };
+    dsd4_image pim = { in->width / k, in->height / k, och, 16, 800, 0, NULL, { 1, 1, 1 }, 0, { 1, 1, 1 } };
     pim.stride = (size_t)pim.width * och * 2;
     pim.data = malloc(pim.stride * pim.height);
     if (!pim.data) return DSD4_ERR_NOMEM;

@@ -62,6 +62,7 @@ typedef struct {
     int focus;
     double ev;
     int samples;
+    int af_mode;       /* DSD4_AF_FAST / DSD4_AF_CLASSIC */
     char status[256];
     int busy;
     dsd4_escl_log_fn log;
@@ -299,12 +300,13 @@ static void *job_thread(void *arg)
 
     dsd4_image im;
     const int negative = j->p.film == DSD4_FILM_NEGATIVE_COLOR || j->p.film == DSD4_FILM_NEGATIVE_BW;
-    const int minolta = negative && g.invert == 2 && !j->p.preview;
+    const int minolta = negative && g.invert == 2; /* previews: from one 800 dpi scan */
     scan_progress(NULL, "opening scanner", -1);
     int r = acquire();
     if (r == DSD4_OK)
-        r = minolta ? dsd4_scan_minolta(g.s, &j->p, &im, NULL, scan_progress, NULL)
-                    : dsd4_scan(g.s, &j->p, &im, scan_progress, NULL);
+        r = minolta && j->p.preview ? dsd4_preview_minolta(g.s, &j->p, &im, NULL, scan_progress, NULL)
+            : minolta               ? dsd4_scan_minolta(g.s, &j->p, &im, NULL, scan_progress, NULL)
+                                    : dsd4_scan(g.s, &j->p, &im, scan_progress, NULL);
     uint8_t *doc = NULL;
     size_t len = 0;
     if (r == DSD4_OK) {
@@ -564,6 +566,7 @@ static void post_scan_job(int fd, const request *rq)
     j->p.frame = g.frame;
     j->p.focus = g.autofocus ? DSD4_FOCUS_AUTO : g.focus;
     j->p.multi_sample = g.samples;
+    j->p.af_mode = g.af_mode;
     j->p.bits = 16;
     /* region in 1/300 inch -> pixels at the requested resolution */
     const long fw = 292, fh = 438;
@@ -679,10 +682,13 @@ static void ui_page(sbuf *b, const char *msg)
     for (int i = 1; i <= nf; i++) sb_add(b, "<option%s>%d</option>", g.frame == i ? " selected" : "", i);
     sb_add(b, "</select></label>"
               "<label><input type=checkbox name=af value=1%s> Autofocus before each scan</label>"
+              "<label>Autofocus <select name=afmode><option value=0%s>fast</option>"
+              "<option value=1%s>classic (original sequence)</option></select></label>"
               "<label>Manual focus position <input name=focus size=5 value=%d></label>"
               "<label>Exposure correction (EV) <input name=ev size=5 value=%.2f></label>"
               "<label>Multi-sampling <select name=samples>",
-           g.autofocus ? " checked" : "", g.focus, g.ev);
+           g.autofocus ? " checked" : "", g.af_mode == DSD4_AF_CLASSIC ? "" : " selected",
+           g.af_mode == DSD4_AF_CLASSIC ? " selected" : "", g.focus, g.ev);
     static const int ms[] = { 1, 2, 4, 8 };
     for (int i = 0; i < 4; i++) sb_add(b, "<option%s>%d</option>", g.samples == ms[i] ? " selected" : "", ms[i]);
     sb_add(b, "</select></label><label>Negatives <select name=invert><option value=0%s>raw (invert later)</option>"
@@ -692,7 +698,8 @@ static void ui_page(sbuf *b, const char *msg)
               "<button name=do value=eject>Eject holder</button><button name=do value=home>Return carriage</button>"
               "<button name=do value=autofocus>Autofocus now</button><button name=do value=calibrate>Recalibrate</button>"
               "</fieldset></form><p>Scan from <b>Image Capture</b> or <b>Preview &rarr; File &rarr; Import from Scanner</b>. "
-              "Scanner area: 0.97 &times; 1.46 in (one 35 mm frame). The settings above apply to every scan.</p></body></html>",
+              "Scanner area: 0.97 &times; 1.46 in (one 35 mm frame). The settings above apply to every scan.</p>"
+              "<p>Raw DNG and HDR scans are made from the dsdual4 menu or command line (Image Capture cannot receive DNG).</p></body></html>",
            g.invert == 0 ? " selected" : "", g.invert == 1 ? " selected" : "", g.invert == 2 ? " selected" : "");
 }
 
@@ -709,6 +716,7 @@ static void handle_ui(int fd, const request *rq)
         if (form_get(rq->body, "focus", v, sizeof v)) g.focus = atoi(v);
         if (form_get(rq->body, "ev", v, sizeof v)) g.ev = atof(v);
         if (form_get(rq->body, "samples", v, sizeof v)) g.samples = atoi(v);
+        if (form_get(rq->body, "afmode", v, sizeof v)) g.af_mode = atoi(v) ? DSD4_AF_CLASSIC : DSD4_AF_FAST;
         pthread_mutex_unlock(&g.lock);
         snprintf(msg, sizeof msg, "Settings saved.");
     } else if (!strcmp(rq->method, "POST") && !strcmp(rq->path, "/action") && rq->body) {
@@ -729,6 +737,7 @@ static void handle_ui(int fd, const request *rq)
             dsd4_default_params(&p);
             p.film = g.film;
             p.frame = g.frame;
+            p.af_mode = g.af_mode;
             int best = 0;
             if (g.frame) r = dsd4_select_frame(g.s, g.frame);
             if (!r) r = dsd4_autofocus(g.s, &p, &best, NULL, NULL);

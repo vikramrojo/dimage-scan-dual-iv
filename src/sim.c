@@ -56,6 +56,19 @@ typedef struct {
     int shading_sends;
     int errors;
     FILE *trace;
+    /* test conditions (environment, see sim_open) */
+    double noise;       /* DSD4_SIM_NOISE: read noise sigma, fraction of full scale */
+    int nega;           /* DSD4_SIM_FILM=nega: neutral scene on orange-mask negative film */
+    double shift;       /* DSD4_SIM_SHIFT: carriage offset (lines) of every second image scan */
+    int outlier;        /* DSD4_SIM_OUTLIER=n: every n-th line read is disturbed */
+    int star;           /* DSD4_SIM_CHART=star: fine detail beyond Nyquist through a lens PSF */
+    double psf;         /* DSD4_SIM_PSF: lens blur sigma in pixels at best focus (star chart) */
+    double breathing;   /* DSD4_SIM_BREATHING: magnification change, ppm per focus step */
+    double jitter;      /* DSD4_SIM_JITTER: random sub-line offset per image scan, sigma in lines */
+    int yres_ok;        /* DSD4_SIM_YRES=1: windows above 3200 dpi oversample; 2: accepted, 3200 pitch */
+    double scan_off;    /* this scan's jitter offset */
+    int image_scans, reads;
+    uint64_t rng;
 } sim_t;
 
 static void sense(sim_t *m, uint8_t key, uint8_t asc, uint8_t ascq)
@@ -86,17 +99,89 @@ static double chart(double x, double y, int c, double blur)
     return 0.15 + 0.6 * (0.6 * ring + 0.4 * grad);
 }
 
+/* colour negative of a neutral scene: per-channel film base (orange mask)
+ * and contrast, transmission = base * 10^(-gamma * log density of the scene) */
+static double nega_chart(double x, double y, int c, double blur)
+{
+    static const double base[3] = { 0.60, 0.25, 0.15 }, gam[3] = { 0.55, 0.62, 0.70 };
+    double s = chart(x, y, 1, blur);
+    return base[c] * pow(10, -gam[c] * log10(s / 0.15));
+}
+
+/* Film-like test scene with detail beyond 3200 dpi: a sum of gratings at
+ * random orientations, 0.05 to 1.2 cycles per pixel (Nyquist is 0.5).  The
+ * lens (Gaussian, sigma = psf + defocus) and the pixel aperture (box) are
+ * applied exactly as each grating's transfer factor, so the simulated scanner
+ * aliases like a real one. */
+#define NGRAT 48
+static struct { double fx, fy, ph, amp; } g_grat[NGRAT];
+
+static void init_gratings(void)
+{
+    uint64_t r = 0x2545f4914f6cdd1dull;
+    for (int i = 0; i < NGRAT; i++) {
+        double u[3];
+        for (int k = 0; k < 3; k++) {
+            r ^= r << 13; r ^= r >> 7; r ^= r << 17;
+            u[k] = (r >> 11) / 9007199254740992.0;
+        }
+        double f = 0.05 * pow(24.0, (i + u[0]) / NGRAT); /* log-spaced 0.05 .. 1.2 */
+        double th = M_PI * u[1];
+        g_grat[i].fx = f * cos(th);
+        g_grat[i].fy = f * sin(th);
+        g_grat[i].ph = 2 * M_PI * u[2];
+        g_grat[i].amp = 0.25 / sqrt(NGRAT);
+    }
+}
+
+static double sinc(double x) { return fabs(x) < 1e-9 ? 1 : sin(M_PI * x) / (M_PI * x); }
+
+static double star_pixel(sim_t *m, double x, double y, int c, double blur_steps)
+{
+    const double sig = m->psf + 0.04 * blur_steps;
+    double v = 0.4;
+    for (int i = 0; i < NGRAT; i++) {
+        const double fx = g_grat[i].fx, fy = g_grat[i].fy, f2 = fx * fx + fy * fy;
+        const double h = exp(-2 * M_PI * M_PI * sig * sig * f2) * sinc(fx) * sinc(fy);
+        v += g_grat[i].amp * h * cos(2 * M_PI * (fx * x + fy * y) + g_grat[i].ph);
+    }
+    return v * (c == 0 ? 1.0 : c == 1 ? 0.95 : 0.9);
+}
+
+static double gauss(sim_t *m)
+{
+    double u[2];
+    for (int k = 0; k < 2; k++) {
+        m->rng ^= m->rng << 13; m->rng ^= m->rng >> 7; m->rng ^= m->rng << 17;
+        u[k] = ((m->rng >> 11) + 0.5) / 9007199254740992.0;
+    }
+    return sqrt(-2 * log(u[0])) * cos(6.283185307179586 * u[1]);
+}
+
 static void make_line(sim_t *m, uint8_t *out, uint32_t line)
 {
     const int deep = m->bpc > 8;
     const uint32_t px = m->line_width / (deep ? 6 : 3);
     const double scale = 3200.0 / m->xres;
-    const double yy = m->uly + (double)line * (3200.0 / m->yres);
+    const double off = ((m->image_scans % 2 == 0) ? m->shift : 0) + m->scan_off; /* every second pass */
     const double blur = fabs((double)(m->focus - SIM_FOCUS_BEST));
+    /* lens breathing: magnification about the optical axis (frame centre
+     * horizontally; the sensor line sits 40 lines off it vertically) */
+    const double mag = 1 + m->breathing * 1e-6 * (m->focus - SIM_FOCUS_BEST);
+    /* DSD4_SIM_YRES=2 behaves like the real FS-V31: a finer vertical window is
+     * accepted but the carriage still steps one 3200 dpi line per line */
+    const double pitch = m->yres > 3200 && m->yres_ok == 2 ? 1.0 : 3200.0 / m->yres;
+    const double yy = m->uly + ((double)line + off) * pitch + 40 * (1 - 1 / mag);
+    const int disturbed = m->outlier > 0 && ++m->reads % m->outlier == 0;
     for (uint32_t i = 0; i < px; i++) {
-        double xx = (m->ulx + i * scale);
+        double xx = 1560 + (m->ulx + i * scale - 1560) / mag;
         for (int c = 0; c < 3; c++) {
-            double v = chart(xx, yy, c, blur) * (m->exp[c] ? m->exp[c] / 142.857 : 1.0);
+            double v = (m->star ? star_pixel(m, xx, yy, c, blur)
+                        : m->nega ? nega_chart(xx, yy, c, blur) : chart(xx, yy, c, blur)) *
+                       (m->exp[c] ? m->exp[c] / 142.857 : 1.0);
+            if (m->noise > 0) v += m->noise * gauss(m);
+            if (disturbed) v += 0.25;
+            if (v < 0) v = 0;
             if (v > 1.0) v = 1.0;
             if (deep) wle16(out + (i * 3 + c) * 2, (uint16_t)(v * 65535));
             else out[i * 3 + c] = (uint8_t)(v * 255);
@@ -257,6 +342,10 @@ static int do_set_window(sim_t *m, const uint8_t *w, size_t len)
         m->multi_sample = (m->bs3 & 2) ? d[61] : 0;
     }
     if (!m->xres || !m->yres) bug(m, "zero resolution");
+    if ((m->yres > 3200 || m->xres > 3200) && !(m->yres_ok && m->xres <= 3200)) {
+        sense(m, 5, 0x26, 0); /* invalid field in parameter list */
+        return 2;
+    }
     if (m->comp != 5 && m->comp != 2) bug(m, "unexpected image composition");
     if (m->line_width == 0 || m->line_count == 0) bug(m, "empty window");
     m->have_window = 1;
@@ -300,6 +389,11 @@ static int sim_exec(dsd4_transport *t, const uint8_t c[10], enum dsd4_dir dir, v
         m->scanning = 1;
         m->sent = 0;
         m->line_no = 0;
+        if (m->line_count >= 64) { /* image scans, not focus/calibration lines */
+            m->image_scans++;
+            m->scan_off = m->jitter > 0 ? m->jitter * gauss(m) : 0;
+            if (m->trace && m->jitter > 0) fprintf(m->trace, "SCANOFF %.5f\n", m->scan_off);
+        }
         m->acc_reads = 0;
         m->total = (uint64_t)m->line_width * m->line_count * (m->multi_sample ? m->multi_sample : 1);
         break;
@@ -364,6 +458,18 @@ dsd4_transport *dsd4_sim_open(const char *firmware_path, char *err, size_t errle
     m->frames = 6;
     if (getenv("DSD4_SIM_APS")) { m->holder = 1; m->frames = 25; } /* APS cartridge adapter */
     m->frame = 1;
+    const char *ev;
+    if ((ev = getenv("DSD4_SIM_NOISE"))) m->noise = atof(ev);
+    if ((ev = getenv("DSD4_SIM_FILM"))) m->nega = !strcmp(ev, "nega");
+    if ((ev = getenv("DSD4_SIM_SHIFT"))) m->shift = atof(ev);
+    if ((ev = getenv("DSD4_SIM_OUTLIER"))) m->outlier = atoi(ev);
+    if ((ev = getenv("DSD4_SIM_CHART"))) m->star = !strcmp(ev, "star");
+    if (m->star) init_gratings();
+    m->psf = (ev = getenv("DSD4_SIM_PSF")) ? atof(ev) : 0.35;
+    if ((ev = getenv("DSD4_SIM_BREATHING"))) m->breathing = atof(ev);
+    if ((ev = getenv("DSD4_SIM_JITTER"))) m->jitter = atof(ev);
+    if ((ev = getenv("DSD4_SIM_YRES"))) m->yres_ok = atoi(ev);
+    m->rng = 0x9e3779b97f4a7c15ull;
     const char *tr = getenv("DSD4_SIM_TRACE");
     if (tr) m->trace = fopen(tr, "w");
     t->priv = m;
