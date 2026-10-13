@@ -117,10 +117,17 @@ run dng-hdr-clean 780x1170 scan --dpi 800 --focus 37 --format dng --hdr -o "$OUT
 ns=$($IC noise "$OUT/dng-raw.dng" "$OUT/dng-hdr-clean.dng" | cut -d' ' -f1)
 echo "     HDR merge of noiseless passes vs single pass: rms $ns"
 check hdr-no-seams gt 0.0005 "$ns"
-if [ "$(sips -g pixelWidth "$OUT/dng-hdr.dng" 2>/dev/null | awk '/pixel/{print $2}')" = 780 ] &&
-   sips -s format png "$OUT/dng-hdr.dng" --out "$OUT/hdr.png" >/dev/null 2>&1 && [ -s "$OUT/hdr.png" ]; then
-    echo "ok   dng-decodes-on-macos"; pass=$((pass+1))
-else echo "FAIL dng-decodes-on-macos"; failn=$((failn+1)); fi
+# macOS must render both DNG flavours with real content (a float DNG without
+# WhiteLevel decodes, but black)
+for f in dng-raw dng-hdr; do
+    m=-1
+    if [ "$(sips -g pixelWidth "$OUT/$f.dng" 2>/dev/null | awk '/pixel/{print $2}')" = 780 ] &&
+       sips -s format bmp "$OUT/$f.dng" --out "$OUT/$f-decoded.bmp" >/dev/null 2>&1; then
+        m=$($IC mean "$OUT/$f-decoded.bmp")
+    fi
+    echo "     $f decoded by macOS: mean level $m"
+    check $f-decodes-on-macos gt "$m" 0.2
+done
 
 # --- super-resolution research: the measurements recover the simulated optics
 export DSD4_SIM_CHART=star

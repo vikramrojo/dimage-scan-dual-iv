@@ -231,7 +231,7 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     e = add(&d, 50707, T_BYTE, 4);
     e->data[0] = 1; e->data[1] = fl ? 4 : 1;
     add_ascii(&d, 50708, "Konica Minolta DiMAGE Scan Dual IV");
-    if (!fl) add_long(&d, 50717, 65535); /* WhiteLevel (float: 1.0 by default) */
+    add_long(&d, 50717, fl ? 1 : 65535); /* WhiteLevel */
     if (ch == 3) {
         /* camera -> XYZ = K * diag(pend); ColorMatrix1 = its inverse */
         double m[9], inv[9], neutral[3];
