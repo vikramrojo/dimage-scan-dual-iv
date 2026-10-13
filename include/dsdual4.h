@@ -129,6 +129,28 @@ void dsd4_film_default_exposure(dsd4_film film, double exp[3]);
 int  dsd4_scan(dsd4 *s, const dsd4_scan_params *p, dsd4_image *img, dsd4_progress_fn cb, void *ud);
 void dsd4_image_free(dsd4_image *img);
 
+/* Negatives with the original Minolta software's processing: autofocus, an
+ * auto-exposure prescan analysed by the original AE algorithm, a final scan
+ * at the AE exposure and the original film curves (inversion, orange mask /
+ * base removal).  The result is a positive 16-bit (or 8-bit) image in the
+ * colour space described by Konica Minolta's MLTF3200n.icc ("Nega Input"). */
+typedef struct {
+    double exposure[3];       /* exposure factors chosen by auto-exposure */
+    int focus;
+    int black_level[3];       /* film base / black levels found (10 bit) */
+} dsd4_minolta_info;
+int  dsd4_scan_minolta(dsd4 *s, const dsd4_scan_params *p, dsd4_image *img, dsd4_minolta_info *info,
+                       dsd4_progress_fn cb, void *ud);
+
+/* Offline: apply the Minolta processing to an existing raw (linear, not
+ * inverted) negative scan; in_exposure = the exposure factors it was scanned
+ * with.  Needs the calibration cache written by dsd4_initialize(). */
+int  dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_exposure[3],
+                          dsd4_image *out, dsd4_minolta_info *info);
+/* Read an uncompressed 8/16-bit gray/RGB TIFF (as written by dsdual4 or
+ * re-saved by Preview). */
+int  dsd4_read_tiff(const char *path, dsd4_image *img);
+
 /* simple post-processing helpers for raw scans */
 void dsd4_invert_negative(dsd4_image *img, int auto_levels);
 int  dsd4_write_tiff(const dsd4_image *img, const char *path);

@@ -58,7 +58,7 @@ typedef struct {
     dsd4_film film;
     int frame;          /* 0 = current */
     int autofocus;
-    int invert;
+    int invert;        /* negatives: 0 raw, 1 simple invert, 2 Minolta processing */
     int focus;
     double ev;
     int samples;
@@ -67,6 +67,8 @@ typedef struct {
     dsd4_escl_log_fn log;
     const void *icc;
     size_t icc_len;
+    const void *icc_n;
+    size_t icc_n_len;
 } server_t;
 
 static server_t g;
@@ -263,7 +265,10 @@ static void *job_thread(void *arg)
     pthread_mutex_unlock(&g.lock);
 
     dsd4_image im;
-    int r = dsd4_scan(g.s, &j->p, &im, scan_progress, NULL);
+    const int negative = j->p.film == DSD4_FILM_NEGATIVE_COLOR || j->p.film == DSD4_FILM_NEGATIVE_BW;
+    const int minolta = negative && g.invert == 2 && !j->p.preview;
+    int r = minolta ? dsd4_scan_minolta(g.s, &j->p, &im, NULL, scan_progress, NULL)
+                    : dsd4_scan(g.s, &j->p, &im, scan_progress, NULL);
     uint8_t *doc = NULL;
     size_t len = 0;
     if (r == DSD4_OK) {
@@ -276,13 +281,21 @@ static void *job_thread(void *arg)
             im.channels = 1;
             im.stride = (size_t)im.width * 2;
         }
-        int negative = j->p.film == DSD4_FILM_NEGATIVE_COLOR || j->p.film == DSD4_FILM_NEGATIVE_BW;
-        if (g.invert && negative) dsd4_invert_negative(&im, 1);
+        if (g.invert && negative && !minolta) dsd4_invert_negative(&im, 1);
         /* linear colour slides keep their data and get the scanner profile;
          * everything else is made display-ready here */
         const int use_icc = g.icc && !negative && im.channels == 3 && j->p.film == DSD4_FILM_POSITIVE_COLOR;
-        if (!use_icc) dsd4_to_display(&im);
-        doc = encode(&im, j->format, use_icc ? g.icc : NULL, g.icc_len, j->bits16, &len);
+        const int use_icc_n = g.icc_n && minolta && im.channels == 3;
+        if (!use_icc && !use_icc_n && !minolta) dsd4_to_display(&im);
+        else if (minolta && !use_icc_n && !j->bits16) {
+            /* B&W Minolta output is already a display-ready positive */
+            size_t n = (size_t)im.width * im.height * im.channels;
+            for (size_t i = 0; i < n; i++) im.data[i] = (uint8_t)(((uint16_t *)im.data)[i] >> 8);
+            im.bits = 8;
+            im.stride = (size_t)im.width * im.channels;
+        }
+        doc = encode(&im, j->format, use_icc ? g.icc : use_icc_n ? g.icc_n : NULL, use_icc ? g.icc_len : g.icc_n_len,
+                     j->bits16, &len);
         logmsg("scan job %s: %dx%d %d dpi -> %s, %zu bytes", j->id, im.width, im.height, im.dpi, j->format, len);
         dsd4_image_free(&im);
     } else {
@@ -630,14 +643,15 @@ static void ui_page(sbuf *b, const char *msg)
            g.autofocus ? " checked" : "", g.focus, g.ev);
     static const int ms[] = { 1, 2, 4, 8 };
     for (int i = 0; i < 4; i++) sb_add(b, "<option%s>%d</option>", g.samples == ms[i] ? " selected" : "", ms[i]);
-    sb_add(b, "</select></label><label><input type=checkbox name=invert value=1%s> Invert negatives</label>"
+    sb_add(b, "</select></label><label>Negatives <select name=invert><option value=0%s>raw (invert later)</option>"
+              "<option value=1%s>simple invert</option><option value=2%s>Minolta processing</option></select></label>"
               "<button>Save</button></fieldset></form>"
               "<form method=post action=/action><fieldset><legend>Scanner</legend>"
               "<button name=do value=eject>Eject holder</button><button name=do value=home>Return carriage</button>"
               "<button name=do value=autofocus>Autofocus now</button><button name=do value=calibrate>Recalibrate</button>"
               "</fieldset></form><p>Scan from <b>Image Capture</b> or <b>Preview &rarr; File &rarr; Import from Scanner</b>. "
               "Scanner area: 0.97 &times; 1.46 in (one 35 mm frame). The settings above apply to every scan.</p></body></html>",
-           g.invert ? " checked" : "");
+           g.invert == 0 ? " selected" : "", g.invert == 1 ? " selected" : "", g.invert == 2 ? " selected" : "");
 }
 
 static void handle_ui(int fd, const request *rq)
@@ -649,7 +663,7 @@ static void handle_ui(int fd, const request *rq)
         if (form_get(rq->body, "film", v, sizeof v)) g.film = (dsd4_film)atoi(v);
         if (form_get(rq->body, "frame", v, sizeof v)) g.frame = atoi(v);
         g.autofocus = form_get(rq->body, "af", v, sizeof v) != NULL;
-        g.invert = form_get(rq->body, "invert", v, sizeof v) != NULL;
+        if (form_get(rq->body, "invert", v, sizeof v)) g.invert = atoi(v);
         if (form_get(rq->body, "focus", v, sizeof v)) g.focus = atoi(v);
         if (form_get(rq->body, "ev", v, sizeof v)) g.ev = atof(v);
         if (form_get(rq->body, "samples", v, sizeof v)) g.samples = atoi(v);
@@ -756,6 +770,8 @@ int dsd4_escl_serve(dsd4 *s, const dsd4_escl_options *o)
     g.log = o->log;
     g.icc = o->icc;
     g.icc_len = o->icc_len;
+    g.icc_n = o->icc_n;
+    g.icc_n_len = o->icc_n_len;
     snprintf(g.name, sizeof g.name, "%s", o->name ? o->name : "DiMAGE Scan Dual IV");
     gethostname(g.host, sizeof g.host);
     if (!strchr(g.host, '.')) strncat(g.host, ".local", sizeof g.host - strlen(g.host) - 1);

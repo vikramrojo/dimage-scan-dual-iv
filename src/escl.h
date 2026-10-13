@@ -14,6 +14,8 @@ typedef struct {
     dsd4_escl_log_fn log;
     const void *icc;        /* scanner input profile for linear positives */
     size_t icc_len;
+    const void *icc_n;      /* Nega Input profile for Minolta-processed colour negatives */
+    size_t icc_n_len;
 } dsd4_escl_options;
 
 /* Runs forever (until the process is terminated). */

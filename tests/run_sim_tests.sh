@@ -46,6 +46,15 @@ if DSD4_SIM_TRACE=/dev/null "$BIN" --sim -q scan --dpi 200 --focus 37 --area=-8,
 if DSD4_SIM_TRACE=/dev/null "$BIN" --sim -q scan --dpi 200 --focus 37 --area 1,0,1073741823,1 -o "$OUT/big.tiff" >/dev/null 2>&1; then
     echo "FAIL oversized-area accepted"; failn=$((failn+1)); else echo "ok   oversized-area-rejected"; pass=$((pass+1)); fi
 
+run minolta-bw   1560x2340  scan --film bw-nega --minolta --dpi 1600 --focus 37 -o "$OUT/minolta-bw.tiff"
+run minolta-col  1560x2340  scan --film nega --minolta --dpi 1600 --focus 37 -o "$OUT/minolta-col.tiff"
+# offline conversion needs a calibration cache: make one in a private HOME
+mkdir -p "$OUT/home"
+if HOME="$OUT/home" DSD4_NO_CACHE= "$BIN" --sim -q init >/dev/null 2>&1 &&
+   HOME="$OUT/home" "$BIN" -q convert "$OUT/bw1600.tiff" --film bw-nega -o "$OUT/converted.tiff" >/dev/null 2>&1 &&
+   [ "$(sips -g pixelWidth "$OUT/converted.tiff" | awk '/pixel/{print $2}')" = 1560 ]; then
+    echo "ok   offline-convert"; pass=$((pass+1))
+else echo "FAIL offline-convert"; failn=$((failn+1)); fi
 if [ -f "../DS_Dual4_extracted/DS Dual4/Profile/MLTF3200p.icc" ]; then
     if sips -g profile "$OUT/full3200.tiff" | grep -q "Posi Linear" && ! sips -g profile "$OUT/nega400.tiff" | grep -q "Posi Linear"; then
         echo "ok   icc-profile-embedding"; pass=$((pass+1))

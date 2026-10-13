@@ -1,11 +1,11 @@
 CC      ?= clang
 ARCHS   ?= -arch arm64 -arch x86_64
 CFLAGS  ?= -O2 -g
-CFLAGS  += -std=c11 -Wall -Wextra -Wno-unused-parameter -Iinclude -Isrc $(ARCHS) -mmacosx-version-min=11.0
+CFLAGS  += -ffp-contract=off -std=c11 -Wall -Wextra -Wno-unused-parameter -Iinclude -Isrc $(ARCHS) -mmacosx-version-min=11.0
 LDLIBS  += -framework IOKit -framework CoreFoundation -framework ApplicationServices -framework ImageIO -lm
 PREFIX  ?= /usr/local
 
-LIB_SRC = src/avision.c src/avlib.c src/calib.c src/scanner.c src/image.c src/usb_macos.c src/sim.c src/escl.c
+LIB_SRC = src/avision.c src/avlib.c src/calib.c src/scanner.c src/image.c src/usb_macos.c src/sim.c src/escl.c src/minolta.c src/minolta_ae.c src/minolta_lut.c
 LIB_OBJ = $(LIB_SRC:src/%.c=build/%.o)
 
 all: build/libdsdual4.a build/dsdual4
@@ -13,7 +13,7 @@ all: build/libdsdual4.a build/dsdual4
 build:
 	mkdir -p build
 
-build/%.o: src/%.c src/dsd4_internal.h src/transport.h src/escl.h include/dsdual4.h | build
+build/%.o: src/%.c src/dsd4_internal.h src/transport.h src/escl.h src/minolta_ae.h src/minolta_lut.h include/dsdual4.h | build
 	$(CC) $(CFLAGS) -c $< -o $@
 
 build/libdsdual4.a: $(LIB_OBJ)
@@ -40,6 +40,7 @@ install: all
 	install -m 644 include/dsdual4.h $(PREFIX)/include/
 	if [ -n "$(FIRMWARE)" ]; then install -m 644 "$(FIRMWARE)" $(PREFIX)/share/dsdual4/DS_Dual4.BIN; fi
 	if [ -n "$(PROFILE)" ]; then install -m 644 "$(PROFILE)" $(PREFIX)/share/dsdual4/MLTF3200p.icc; fi
+	if [ -n "$(PROFILE)" ] && [ -f "$$(dirname "$(PROFILE)")/MLTF3200n.icc" ]; then install -m 644 "$$(dirname "$(PROFILE)")/MLTF3200n.icc" $(PREFIX)/share/dsdual4/MLTF3200n.icc; fi
 
 # Run the AirScan bridge in the background at login (scanner appears in
 # Image Capture / Preview whenever it is connected).

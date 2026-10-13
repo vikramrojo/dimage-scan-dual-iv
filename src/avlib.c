@@ -184,11 +184,19 @@ static void cache_path(char *out, size_t n, const char *name)
     snprintf(out, n, "%s/Library/Application Support/dsdual4/%s", home ? home : ".", name);
 }
 
+static int no_cache(void)
+{
+    const char *e = getenv("DSD4_NO_CACHE");
+    return e && *e && strcmp(e, "0");
+}
+
 static void save_raw(dsd4 *s, const char *name, const void *data, size_t n)
 {
     char dir[1024], path[1024];
-    if (getenv("DSD4_NO_CACHE")) return;
+    if (no_cache()) return;
     cache_path(dir, sizeof dir, "");
+    for (char *q = dir + 1; *q; q++) /* mkdir -p */
+        if (*q == '/') { *q = 0; mkdir(dir, 0755); *q = '/'; }
     mkdir(dir, 0755);
     cache_path(path, sizeof path, name);
     FILE *f = fopen(path, "wb");
@@ -201,7 +209,7 @@ static void save_raw(dsd4 *s, const char *name, const void *data, size_t n)
 static int read_raw(const char *name, void *data, size_t n)
 {
     char path[1024];
-    if (getenv("DSD4_NO_CACHE")) return 0;
+    if (no_cache()) return 0;
     cache_path(path, sizeof path, name);
     FILE *f = fopen(path, "rb");
     if (!f) return 0;

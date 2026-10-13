@@ -132,10 +132,25 @@ The AirScan bridge colour-manages slides through the same profile and
 delivers sRGB JPEG/PDF (or profile-tagged PNG/TIFF) to Image Capture and
 Preview. Other film types are made display-ready.
 
-Negatives: the scanner never inverts. The original software inverted on the
-Mac with film-specific curves. `--invert` (and the menu, automatically) does
-a simple per-channel inversion. For best colour, keep the raw 16-bit negative
-and use a dedicated tool (Negative Lab Pro, darktable negadoctor, ColorPerfect).
+Negatives: the scanner never inverts. Three ways to get a positive:
+
+* **Minolta processing** (`--minolta`, the menu's "Negatives → Minolta
+  processing", or the settings page of `serve`): the original software's own
+  pipeline. Autofocus, an 800 dpi auto-exposure prescan analysed by the
+  original AE algorithm, a final scan at the exposure it chooses, and the
+  original film curves (inversion, base and orange-mask removal, B&W density
+  curve). Both algorithms are ports of the original PowerPC code, bit-identical
+  to it under emulation (`tests/diff/ae_diff.py`, `tests/diff/lut_diff.py`).
+  Colour results embed `MLTF3200n.icc` ("Nega Input"), the profile the
+  original used for exactly this data.
+* `dsdual4 convert raw.tiff --film bw-nega|nega -o out.tiff` applies the same
+  processing offline to a raw negative you already scanned (pass
+  `--scan-exposure` if it was not scanned at the film's standard exposure;
+  a scan made as "slide" used 1.4286). The exposure step is approximated by
+  scaling the existing data instead of rescanning.
+* `--invert`: a quick per-channel inversion. Or keep the raw 16-bit negative
+  and use a dedicated tool (Negative Lab Pro, darktable negadoctor, ColorPerfect).
+
 The original software's image processing (Pixel Polish, Auto Dust Brush,
 Grain Dissolver) is not included. The Dual IV has no infrared channel, so no ICE.
 

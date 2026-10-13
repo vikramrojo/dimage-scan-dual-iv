@@ -19,6 +19,8 @@ static int g_verbose = 1;
 static uint8_t *g_icc;      /* scanner input profile (MLTF3200p.icc, "Posi Linear") */
 static size_t g_icc_len;
 static char g_icc_path[PATH_MAX];
+static uint8_t *g_icc_n;    /* MLTF3200n.icc ("Nega Input") for Minolta-processed negatives */
+static size_t g_icc_n_len;
 static int g_progress_tty;
 
 static void usage(void)
@@ -40,6 +42,9 @@ static void usage(void)
 "  preview -o file.tiff      800 dpi preview of the current/selected frame\n"
 "  scan -o file.tiff         scan one frame\n"
 "  scan-all -o prefix        scan every frame of the holder (prefix-N.tiff)\n"
+"  convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n"
+"                            apply the original Minolta negative processing to\n"
+"                            an existing raw negative scan (no scanner needed)\n"
 "  serve [--port n] [--film type] [--local] [--wait]\n"
 "                            AirScan server: makes the scanner available in\n"
 "                            Image Capture and Preview (settings page at /);\n"
@@ -67,6 +72,8 @@ static void usage(void)
 "  --area <x,y,w,h>          crop in pixels at the output resolution\n"
 "  --samples <1|2|4|8>       multi-sample scanning (default 1)\n"
 "  --invert                  invert negatives (auto levels per channel)\n"
+"  --minolta                 negatives: the original Minolta auto-exposure and\n"
+"                            film curves (prescan + positive result)\n"
 "  --raw                     no host-side digital gain\n"
 "  --flip-x / --flip-y       mirror the image\n"
 "  --rotate <90|180|270>     rotate clockwise\n");
@@ -162,7 +169,27 @@ static void load_profile(const char *argv0, const char *explicit_path)
             g_icc = NULL;
         }
         fclose(f);
-        if (g_icc) return;
+        if (g_icc) {
+            /* the negative profile lives next to the positive one */
+            char np[PATH_MAX];
+            snprintf(np, sizeof np, "%s", g_icc_path);
+            char *q = strstr(np, "MLTF3200p.icc");
+            if (q) {
+                memcpy(q, "MLTF3200n.icc", 13);
+                FILE *fn = fopen(np, "rb");
+                if (fn) {
+                    fseek(fn, 0, SEEK_END);
+                    long nl = ftell(fn);
+                    fseek(fn, 0, SEEK_SET);
+                    if (nl > 132 && nl < (1 << 20) && (g_icc_n = malloc((size_t)nl)) &&
+                        fread(g_icc_n, 1, (size_t)nl, fn) == (size_t)nl)
+                        g_icc_n_len = (size_t)nl;
+                    else { free(g_icc_n); g_icc_n = NULL; }
+                    fclose(fn);
+                }
+            }
+            return;
+        }
     }
     if (explicit_path) fprintf(stderr, "dsdual4: cannot read profile %s\n", explicit_path);
 }
@@ -259,7 +286,8 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
         { "frame", 1, 0, 'f' }, { "dpi", 1, 0, 'd' }, { "bits", 1, 0, 'b' }, { "film", 1, 0, 'F' },
         { "exposure", 1, 0, 'e' }, { "ev", 1, 0, 'E' }, { "focus", 1, 0, 'c' }, { "area", 1, 0, 'a' },
         { "samples", 1, 0, 's' }, { "invert", 0, 0, 'i' }, { "raw", 0, 0, 'r' }, { "flip-x", 0, 0, 'X' },
-        { "flip-y", 0, 0, 'Y' }, { "rotate", 1, 0, 'R' }, { "output", 1, 0, 'o' }, { 0, 0, 0, 0 },
+        { "flip-y", 0, 0, 'Y' }, { "rotate", 1, 0, 'R' }, { "output", 1, 0, 'o' }, { "minolta", 0, 0, 'M' },
+        { 0, 0, 0, 0 },
     };
     optind = 1;
     int c;
@@ -296,6 +324,7 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
         case 'Y': o->fy = 1; break;
         case 'R': o->rot = atoi(optarg); break;
         case 'o': o->out = optarg; break;
+        case 'M': o->minolta = 1; break;
         default: return -1;
         }
     }
@@ -314,10 +343,17 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         }
     }
     dsd4_image im;
-    int r = dsd4_scan(s, &p, &im, on_progress, NULL);
+    dsd4_minolta_info mi;
+    const int minolta = o->minolta && !p.preview &&
+                        (p.film == DSD4_FILM_NEGATIVE_COLOR || p.film == DSD4_FILM_NEGATIVE_BW);
+    int r = minolta ? dsd4_scan_minolta(s, &p, &im, &mi, on_progress, NULL)
+                    : dsd4_scan(s, &p, &im, on_progress, NULL);
     done_progress();
     if (check(r, s, p.preview ? "preview" : "scan")) return 1;
-    if (o->invert) dsd4_invert_negative(&im, 1);
+    if (minolta && g_verbose >= 1)
+        fprintf(stderr, "Minolta processing: AE exposure %.3f/%.3f/%.3f, black level %d/%d/%d\n", mi.exposure[0],
+                mi.exposure[1], mi.exposure[2], mi.black_level[0], mi.black_level[1], mi.black_level[2]);
+    if (o->invert && !minolta) dsd4_invert_negative(&im, 1);
     if (o->display) dsd4_to_display(&im);
     if (o->fx) flip_x(&im);
     if (o->fy) flip_y(&im);
@@ -329,9 +365,15 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         }
     }
     /* the scanner profile describes linear colour positives only */
-    int embed = g_icc && !o->no_profile && !o->display && !o->invert && im.channels == 3 &&
-                p.film == DSD4_FILM_POSITIVE_COLOR;
-    r = dsd4_write_tiff_icc(&im, path, embed ? g_icc : NULL, embed ? g_icc_len : 0);
+    /* slides: Posi Linear profile; Minolta-processed colour negatives: Nega Input */
+    const uint8_t *icc = NULL;
+    size_t icc_len = 0;
+    if (!o->no_profile && !o->display && im.channels == 3) {
+        if (p.film == DSD4_FILM_POSITIVE_COLOR && !o->invert) { icc = g_icc; icc_len = g_icc_len; }
+        else if (minolta) { icc = g_icc_n; icc_len = g_icc_n_len; }
+    }
+    const int embed = icc != NULL;
+    r = dsd4_write_tiff_icc(&im, path, icc, icc_len);
     if (r != DSD4_OK) {
         fprintf(stderr, "dsdual4: cannot write %s\n", path);
         dsd4_image_free(&im);
@@ -341,7 +383,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         fprintf(stderr, "wrote %s: %dx%d, %d-bit %s, %d dpi, focus %d, digital gain %.2f/%.2f/%.2f%s\n",
                 path, im.width, im.height, im.bits, im.channels == 3 ? "RGB" : "gray", im.dpi, im.focus,
                 im.digital_gain[0], im.digital_gain[1], im.digital_gain[2],
-                embed ? ", scanner profile embedded" : "");
+                embed ? (minolta ? ", Nega Input profile embedded" : ", scanner profile embedded") : "");
     dsd4_image_free(&im);
     return 0;
 }
@@ -739,6 +781,62 @@ static int run_menu(dsd4 *s, int fw_check)
     }
 }
 
+/* dsdual4 convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f|r,g,b] */
+static int cmd_convert(int argc, char **argv)
+{
+    const char *in = NULL, *out = NULL;
+    dsd4_film film = DSD4_FILM_NEGATIVE_BW;
+    double ex[3] = { 0, 0, 0 };
+    int bits = 16;
+    static const char *use = "usage: dsdual4 convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n";
+    for (int k = 1; k < argc; k++) {
+        if (!strcmp(argv[k], "-o") && k + 1 < argc) out = argv[++k];
+        else if (!strcmp(argv[k], "--film") && k + 1 < argc) {
+            if (parse_film(argv[++k], &film) || (film != DSD4_FILM_NEGATIVE_BW && film != DSD4_FILM_NEGATIVE_COLOR)) {
+                fprintf(stderr, "dsdual4: convert needs --film nega or bw-nega\n");
+                return 2;
+            }
+        } else if (!strcmp(argv[k], "--scan-exposure") && k + 1 < argc) {
+            int n = sscanf(argv[++k], "%lf,%lf,%lf", &ex[0], &ex[1], &ex[2]);
+            if (n == 1) ex[1] = ex[2] = ex[0];
+            else if (n != 3) { fprintf(stderr, "bad --scan-exposure\n"); return 2; }
+        } else if (!strcmp(argv[k], "--bits") && k + 1 < argc) bits = atoi(argv[++k]);
+        else if (argv[k][0] != '-' && !in) in = argv[k];
+        else { fputs(use, stderr); return 2; }
+    }
+    if (!in || !out) { fputs(use, stderr); return 2; }
+    if (!(ex[0] > 0)) {
+        dsd4_film_default_exposure(film, ex);
+        fprintf(stderr, "assuming the scan was made at the %s standard exposure %.3f/%.3f/%.3f "
+                "(--scan-exposure to override)\n", film == DSD4_FILM_NEGATIVE_BW ? "B&W negative" : "colour negative",
+                ex[0], ex[1], ex[2]);
+    }
+    dsd4_image src, dst;
+    int r = dsd4_read_tiff(in, &src);
+    if (r) { fprintf(stderr, "dsdual4: cannot read %s (uncompressed 16-bit TIFF needed)\n", in); return 1; }
+    if (src.bits != 16) { fprintf(stderr, "dsdual4: %s is not a 16-bit (raw) scan\n", in); dsd4_image_free(&src); return 1; }
+    if (!src.dpi) src.dpi = 3200;
+    dsd4_minolta_info info;
+    r = dsd4_minolta_convert(&src, film, ex, &dst, &info);
+    dsd4_image_free(&src);
+    if (r == DSD4_ERR_IO) { fprintf(stderr, "dsdual4: no calibration cache: run 'dsdual4 init' with the scanner first\n"); return 1; }
+    if (r) { fprintf(stderr, "dsdual4: conversion failed: %s\n", dsd4_strerror(r)); return 1; }
+    if (bits == 8) {
+        size_t n = (size_t)dst.width * dst.height * dst.channels;
+        for (size_t i = 0; i < n; i++) dst.data[i] = (uint8_t)(((uint16_t *)dst.data)[i] >> 8);
+        dst.bits = 8;
+        dst.stride = (size_t)dst.width * dst.channels;
+    }
+    int embed = g_icc_n && dst.channels == 3;
+    r = dsd4_write_tiff_icc(&dst, out, embed ? g_icc_n : NULL, embed ? g_icc_n_len : 0);
+    fprintf(stderr, "wrote %s: %dx%d %d-bit %s, Minolta AE exposure %.3f/%.3f/%.3f, black level %d/%d/%d%s\n", out,
+            dst.width, dst.height, dst.bits, dst.channels == 3 ? "RGB" : "gray", info.exposure[0], info.exposure[1],
+            info.exposure[2], info.black_level[0], info.black_level[1], info.black_level[2],
+            embed ? ", Nega Input profile embedded" : "");
+    dsd4_image_free(&dst);
+    return r ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     int use_sim = 0, fw_check = 0, no_profile = 0;
@@ -764,6 +862,8 @@ int main(int argc, char **argv)
     g_progress_tty = isatty(2);
     if (!fw) fw = find_firmware(argv[0]);
     if (!no_profile) load_profile(argv[0], profile);
+
+    if (!strcmp(cmd, "convert")) return cmd_convert(cargc, cargv);
 
     char err[256] = "";
     dsd4 *s = NULL;
@@ -870,7 +970,8 @@ int main(int argc, char **argv)
             }
         }
     } else if (!strcmp(cmd, "serve")) {
-        dsd4_escl_options eo = { .port = 8090, .film = DSD4_FILM_POSITIVE_COLOR, .icc = g_icc, .icc_len = g_icc_len };
+        dsd4_escl_options eo = { .port = 8090, .film = DSD4_FILM_POSITIVE_COLOR, .icc = g_icc, .icc_len = g_icc_len,
+                                  .icc_n = g_icc_n, .icc_n_len = g_icc_n_len };
         for (int k = 1; k < cargc; k++) {
             if (!strcmp(cargv[k], "--port") && k + 1 < cargc) eo.port = atoi(cargv[++k]);
             else if (!strcmp(cargv[k], "--name") && k + 1 < cargc) eo.name = cargv[++k];
