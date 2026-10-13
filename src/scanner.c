@@ -21,8 +21,8 @@ static int film_type_code(dsd4_film f)
     switch (f) {
     case DSD4_FILM_POSITIVE_COLOR: return 5;
     case DSD4_FILM_NEGATIVE_COLOR: return 6;
-    case DSD4_FILM_POSITIVE_BW: return 1;
-    case DSD4_FILM_NEGATIVE_BW: return 2;
+    case DSD4_FILM_POSITIVE_BW: return 9;  /* MFSFilmType codes: 5 colour posi, 6 colour nega, 9 B&W posi, 10 B&W nega */
+    case DSD4_FILM_NEGATIVE_BW: return 10;
     }
     return 5;
 }
