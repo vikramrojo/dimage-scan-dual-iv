@@ -69,11 +69,44 @@ typedef struct {
     size_t icc_len;
     const void *icc_n;
     size_t icc_n_len;
+    int shared;                   /* open the scanner per operation */
+    void (*on_open)(dsd4 *, void *);
+    void *ud;
 } server_t;
 
 static server_t g;
 
 static void logmsg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+/* scanner_lock must be held.  Shared mode: open and initialise the scanner
+ * (quick when it is already calibrated).  Returns DSD4_OK or an error. */
+static int acquire(void)
+{
+    if (g.s) return DSD4_OK;
+    if (!g.shared) return DSD4_ERR_IO;
+    char err[256];
+    if (dsd4_open_usb(&g.s, err, sizeof err) != DSD4_OK) {
+        g.s = NULL;
+        return DSD4_ERR_IO;
+    }
+    if (g.on_open) g.on_open(g.s, g.ud);
+    int r = dsd4_initialize(g.s, 0, NULL, NULL);
+    if (r) {
+        dsd4_close(g.s);
+        g.s = NULL;
+    }
+    return r;
+}
+
+static void release(void)
+{
+    if (g.shared && g.s) {
+        dsd4_close(g.s);
+        g.s = NULL;
+    }
+}
+
+static int scanner_code(void) { return g.s ? dsd4_last_error(g.s) : 0; }
 static void logmsg(const char *fmt, ...)
 {
     char b[512];
@@ -267,7 +300,10 @@ static void *job_thread(void *arg)
     dsd4_image im;
     const int negative = j->p.film == DSD4_FILM_NEGATIVE_COLOR || j->p.film == DSD4_FILM_NEGATIVE_BW;
     const int minolta = negative && g.invert == 2 && !j->p.preview;
-    int r = minolta ? dsd4_scan_minolta(g.s, &j->p, &im, NULL, scan_progress, NULL)
+    scan_progress(NULL, "opening scanner", -1);
+    int r = acquire();
+    if (r == DSD4_OK)
+        r = minolta ? dsd4_scan_minolta(g.s, &j->p, &im, NULL, scan_progress, NULL)
                     : dsd4_scan(g.s, &j->p, &im, scan_progress, NULL);
     uint8_t *doc = NULL;
     size_t len = 0;
@@ -299,14 +335,16 @@ static void *job_thread(void *arg)
         logmsg("scan job %s: %dx%d %d dpi -> %s, %zu bytes", j->id, im.width, im.height, im.dpi, j->format, len);
         dsd4_image_free(&im);
     } else {
-        logmsg("scan job %s failed: %s (scanner code 0x%02x)", j->id, dsd4_strerror(r), dsd4_last_error(g.s));
-        if (r == DSD4_ERR_IO) {
+        logmsg("scan job %s failed: %s (scanner code 0x%02x)%s", j->id, dsd4_strerror(r), scanner_code(),
+               g.s ? "" : " - scanner not connected, or in use by another program");
+        if (r == DSD4_ERR_IO && !g.shared) {
             /* scanner unplugged or powered off: exit so launchd restarts us and
              * we wait for the device again */
             logmsg("lost the USB connection to the scanner; exiting");
             _exit(75);
         }
     }
+    release();
     pthread_mutex_lock(&g.lock);
     j->doc = doc;
     j->doc_len = len;
@@ -614,8 +652,12 @@ static void ui_page(sbuf *b, const char *msg)
 {
     dsd4_holder_info h;
     memset(&h, 0, sizeof h);
+    const char *conn = "";
     if (pthread_mutex_trylock(&g.scanner_lock) == 0) {
-        dsd4_get_holder(g.s, &h);
+        if (g.shared && !dsd4_usb_present()) conn = " &middot; <b>scanner not connected</b>";
+        else if (acquire() == DSD4_OK) dsd4_get_holder(g.s, &h);
+        else conn = " &middot; <b>scanner busy (in use by another program?)</b>";
+        release();
         pthread_mutex_unlock(&g.scanner_lock);
     }
     static const char *hn[] = { "no holder", "35 mm film strip", "35 mm slide mount", "APS adapter", "unknown" };
@@ -626,8 +668,8 @@ static void ui_page(sbuf *b, const char *msg)
               "fieldset{border-color:#444}}fieldset{border:1px solid #ccc;border-radius:8px;margin:12px 0;padding:12px}"
               "label{display:block;margin:6px 0}button{font:inherit;padding:6px 14px;margin:4px 4px 0 0}"
               ".msg{padding:8px;border-radius:6px;background:#2a7a2a22}</style></head><body>"
-              "<h2>%s</h2><p>Status: <b>%s</b> &middot; Holder: <b>%s</b></p>",
-           g.name, g.name, g.status, hn[h.holder]);
+              "<h2>%s</h2><p>Status: <b>%s</b> &middot; Holder: <b>%s</b>%s</p>",
+           g.name, g.name, g.status, hn[h.holder], conn);
     if (msg && *msg) sb_add(b, "<p class=msg>%s</p>", msg);
     sb_add(b, "<form method=post action=/settings><fieldset><legend>Settings for the next scan</legend><label>Film "
               "<select name=film>");
@@ -673,8 +715,9 @@ static void handle_ui(int fd, const request *rq)
         char v[32] = "";
         form_get(rq->body, "do", v, sizeof v);
         pthread_mutex_lock(&g.scanner_lock);
-        int r = DSD4_OK;
-        if (!strcmp(v, "eject")) r = dsd4_eject(g.s);
+        int r = acquire();
+        if (r) ;
+        else if (!strcmp(v, "eject")) r = dsd4_eject(g.s);
         else if (!strcmp(v, "home")) r = dsd4_home(g.s);
         else if (!strcmp(v, "calibrate")) {
             uint8_t st = 3;
@@ -691,8 +734,10 @@ static void handle_ui(int fd, const request *rq)
             if (!r) r = dsd4_autofocus(g.s, &p, &best, NULL, NULL);
             if (!r) { g.focus = best; snprintf(msg, sizeof msg, "Best focus position: %d", best); }
         }
+        int code = scanner_code();
+        release();
         pthread_mutex_unlock(&g.scanner_lock);
-        if (r) snprintf(msg, sizeof msg, "Failed: %s (scanner code 0x%02x)", dsd4_strerror(r), dsd4_last_error(g.s));
+        if (r) snprintf(msg, sizeof msg, "Failed: %s (scanner code 0x%02x)", dsd4_strerror(r), code);
         else if (!*msg) snprintf(msg, sizeof msg, "Done.");
     }
     sbuf b = { 0 };
@@ -762,10 +807,43 @@ static void DNSSD_API reg_reply(DNSServiceRef ref, DNSServiceFlags flags, DNSSer
     else logmsg("advertised as \"%s\" (%s%s) - it should now appear in Image Capture and Preview", name, type, domain);
 }
 
+
+static DNSServiceRef bonjour_register(int local_only, const char *admin, const char *uuidtxt)
+{
+    TXTRecordRef txt;
+    TXTRecordCreate(&txt, 0, NULL);
+#define TXT(k, v) TXTRecordSetValue(&txt, k, (uint8_t)strlen(v), v)
+    TXT("txtvers", "1");
+    TXT("vers", "2.63");
+    TXT("rs", "eSCL");
+    TXT("ty", g.name);
+    TXT("pdl", "image/jpeg,image/png,image/tiff,application/pdf");
+    TXT("cs", "color,grayscale");
+    TXT("is", "platen");
+    TXT("duplex", "F");
+    TXT("uuid", uuidtxt);
+    TXT("adminurl", admin);
+    TXT("note", "film scanner (dsdual4)");
+#undef TXT
+    DNSServiceRef sd = NULL;
+    DNSServiceErrorType e = DNSServiceRegister(&sd, 0, local_only ? kDNSServiceInterfaceIndexLocalOnly : 0,
+                                               g.name, "_uscan._tcp", NULL, NULL, htons((uint16_t)g.port),
+                                               TXTRecordGetLength(&txt), TXTRecordGetBytesPtr(&txt), reg_reply, NULL);
+    TXTRecordDeallocate(&txt);
+    if (e) {
+        logmsg("Bonjour registration failed (%d); clients must be pointed at %s", e, admin);
+        return NULL;
+    }
+    return sd;
+}
+
 int dsd4_escl_serve(dsd4 *s, const dsd4_escl_options *o)
 {
     memset(&g, 0, sizeof g);
     g.s = s;
+    g.shared = s == NULL;
+    g.on_open = o->on_open;
+    g.ud = o->ud;
     g.port = o->port ? o->port : 8090;
     g.log = o->log;
     g.icc = o->icc;
@@ -802,36 +880,30 @@ int dsd4_escl_serve(dsd4 *s, const dsd4_escl_options *o)
     char admin[300], uuidtxt[48];
     snprintf(admin, sizeof admin, "http://%s:%d/", g.host, g.port);
     snprintf(uuidtxt, sizeof uuidtxt, "%s", g.uuid);
-    TXTRecordRef txt;
-    TXTRecordCreate(&txt, 0, NULL);
-#define TXT(k, v) TXTRecordSetValue(&txt, k, (uint8_t)strlen(v), v)
-    TXT("txtvers", "1");
-    TXT("vers", "2.63");
-    TXT("rs", "eSCL");
-    TXT("ty", g.name);
-    TXT("pdl", "image/jpeg,image/png,image/tiff,application/pdf");
-    TXT("cs", "color,grayscale");
-    TXT("is", "platen");
-    TXT("duplex", "F");
-    TXT("uuid", uuidtxt);
-    TXT("adminurl", admin);
-    TXT("note", "film scanner (dsdual4)");
-#undef TXT
-    DNSServiceRef sd = NULL;
-    DNSServiceErrorType e = DNSServiceRegister(&sd, 0, o->localhost_only ? kDNSServiceInterfaceIndexLocalOnly : 0,
-                                               g.name, "_uscan._tcp", NULL, NULL, htons((uint16_t)g.port),
-                                               TXTRecordGetLength(&txt), TXTRecordGetBytesPtr(&txt), reg_reply, NULL);
-    TXTRecordDeallocate(&txt);
-    if (e) logmsg("Bonjour registration failed (%d); clients must be pointed at %s", e, admin);
     logmsg("eSCL server listening on port %d (settings page: %s)", g.port, admin);
+    if (g.shared) logmsg("shared mode: the scanner is opened only while scanning");
 
+    DNSServiceRef sd = NULL;
+    int present = -1;
     for (;;) {
+        /* advertise to Image Capture only while the scanner is attached */
+        int now = g.shared ? dsd4_usb_present() : 1;
+        if (now != present) {
+            present = now;
+            if (present && !sd) sd = bonjour_register(o->localhost_only, admin, uuidtxt);
+            else if (!present && sd) {
+                DNSServiceRefDeallocate(sd);
+                sd = NULL;
+                logmsg("scanner disconnected: no longer advertised");
+            }
+        }
         fd_set rf;
         FD_ZERO(&rf);
         FD_SET(ls, &rf);
         int maxfd = ls, dfd = sd ? DNSServiceRefSockFD(sd) : -1;
         if (dfd >= 0) { FD_SET(dfd, &rf); if (dfd > maxfd) maxfd = dfd; }
-        if (select(maxfd + 1, &rf, NULL, NULL, NULL) < 0) { if (errno == EINTR) continue; break; }
+        struct timeval tv = { 3, 0 };
+        if (select(maxfd + 1, &rf, NULL, NULL, &tv) < 0) { if (errno == EINTR) continue; break; }
         if (dfd >= 0 && FD_ISSET(dfd, &rf)) DNSServiceProcessResult(sd);
         if (FD_ISSET(ls, &rf)) {
             int c = accept(ls, NULL, NULL);

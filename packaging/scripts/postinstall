@@ -1,0 +1,12 @@
+#!/bin/sh
+# Start the Image Capture service for the logged-in user (it also starts at
+# every login from /Library/LaunchAgents).
+PLIST=/Library/LaunchAgents/org.dsdual4.airscan.plist
+chown root:wheel "$PLIST"; chmod 644 "$PLIST"
+USER_ID=$(stat -f %u /dev/console 2>/dev/null)
+if [ -n "$USER_ID" ] && [ "$USER_ID" != 0 ]; then
+    launchctl bootout "gui/$USER_ID/org.dsdual4.airscan" 2>/dev/null
+    launchctl enable "gui/$USER_ID/org.dsdual4.airscan" 2>/dev/null
+    launchctl bootstrap "gui/$USER_ID" "$PLIST" 2>/dev/null
+fi
+exit 0

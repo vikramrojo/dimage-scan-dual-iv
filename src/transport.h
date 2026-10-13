@@ -38,6 +38,7 @@ struct dsd4_transport {
 #define DSD4_USB_PID 0x000a
 
 dsd4_transport *dsd4_usb_open(char *err, size_t errlen);
+int dsd4_usb_present(void); /* scanner attached (does not open it) */
 dsd4_transport *dsd4_sim_open(const char *firmware_path, char *err, size_t errlen);
 
 #endif

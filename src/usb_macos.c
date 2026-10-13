@@ -150,6 +150,26 @@ static IntfIf open_first_interface(DevIf dev, char *err, size_t errlen)
     return intf;
 }
 
+int dsd4_usb_present(void)
+{
+    CFMutableDictionaryRef match = IOServiceMatching(kIOUSBDeviceClassName);
+    if (!match) return 0;
+    SInt32 vid = DSD4_USB_VID, pid = DSD4_USB_PID;
+    CFNumberRef nv = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &vid);
+    CFNumberRef np = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pid);
+    CFDictionarySetValue(match, CFSTR(kUSBVendorID), nv);
+    CFDictionarySetValue(match, CFSTR(kUSBProductID), np);
+    CFRelease(nv);
+    CFRelease(np);
+    io_iterator_t it = 0;
+    if (IOServiceGetMatchingServices(MACH_PORT_NULL, match, &it) != KERN_SUCCESS) return 0;
+    int n = 0;
+    io_service_t svc;
+    while ((svc = IOIteratorNext(it))) { n++; IOObjectRelease(svc); }
+    IOObjectRelease(it);
+    return n > 0;
+}
+
 dsd4_transport *dsd4_usb_open(char *err, size_t errlen)
 {
     CFMutableDictionaryRef match = IOServiceMatching(kIOUSBDeviceClassName);

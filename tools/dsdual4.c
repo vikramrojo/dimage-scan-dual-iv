@@ -4,6 +4,7 @@
 #include "dsdual4.h"
 #include "../src/transport.h"
 #include "../src/escl.h"
+#include "version.h"
 
 #include <getopt.h>
 #include <math.h>
@@ -46,10 +47,13 @@ static void usage(void)
 "  convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n"
 "                            apply the original Minolta negative processing to\n"
 "                            an existing raw negative scan (no scanner needed)\n"
-"  serve [--port n] [--film type] [--local] [--wait]\n"
+"  serve [--port n] [--film type] [--local]\n"
 "                            AirScan server: makes the scanner available in\n"
-"                            Image Capture and Preview (settings page at /);\n"
-"                            --wait: wait until the scanner is connected\n"
+"                            Image Capture and Preview (settings page at /).\n"
+"                            It opens the scanner only while scanning and is\n"
+"                            listed only while the scanner is plugged in\n"
+"  service start|stop|status the background Image Capture service (installed\n"
+"                            by the package; stop also keeps it off at login)\n"
 "\n"
 "global options:\n"
 "  --sim                     use the built-in protocol simulator instead of USB\n"
@@ -131,8 +135,8 @@ static const char *find_firmware(const char *argv0)
  * user's copy of the original software (not distributed with dsdual4). */
 static void load_profile(const char *argv0, const char *explicit_path)
 {
-    char buf[PATH_MAX];
-    const char *cands[8];
+    char buf[PATH_MAX], buf2[PATH_MAX];
+    const char *cands[10];
     int n = 0;
     if (explicit_path) cands[n++] = explicit_path;
     else {
@@ -146,6 +150,8 @@ static void load_profile(const char *argv0, const char *explicit_path)
         if (slash) {
             snprintf(buf, sizeof buf, "%.*s/../share/dsdual4/MLTF3200p.icc", (int)(slash - argv0), argv0);
             cands[n++] = buf;
+            snprintf(buf2, sizeof buf2, "%.*s/../profiles/MLTF3200p.icc", (int)(slash - argv0), argv0);
+            cands[n++] = buf2; /* source tree: build/dsdual4 */
         }
     }
     for (int i = 0; i < n; i++) {
@@ -705,7 +711,7 @@ static int run_menu(dsd4 *s, int fw_check)
     dsd4_info info;
     int have_info = dsd4_get_info(s, &info) == DSD4_OK;
 
-    printf("\n%sdsdual4%s - Konica Minolta DiMAGE Scan Dual IV\n", C("1"), C("0"));
+    printf("\n%sdsdual4 %s%s - Konica Minolta DiMAGE Scan Dual IV\n", C("1"), DSD4_VERSION, C("0"));
     printf("Type the letter or number of an option. 'h' shows instructions.\n");
     for (;;) {
         dsd4_holder_info h;
@@ -903,6 +909,76 @@ static int run_menu(dsd4 *s, int fw_check)
 }
 
 /* dsdual4 convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f|r,g,b] */
+static void serve_on_open(dsd4 *s, void *ud)
+{
+    (void)ud;
+    dsd4_set_log(s, on_log, NULL, g_verbose);
+}
+
+/* s == NULL: shared mode (the server opens the scanner per operation) */
+static int cmd_serve(dsd4 *s, int fw_check, int argc, char **argv)
+{
+    dsd4_escl_options eo = { .port = 8090, .film = DSD4_FILM_POSITIVE_COLOR, .icc = g_icc, .icc_len = g_icc_len,
+                             .icc_n = g_icc_n, .icc_n_len = g_icc_n_len, .on_open = serve_on_open };
+    for (int k = 1; k < argc; k++) {
+        if (!strcmp(argv[k], "--port") && k + 1 < argc) eo.port = atoi(argv[++k]);
+        else if (!strcmp(argv[k], "--name") && k + 1 < argc) eo.name = argv[++k];
+        else if (!strcmp(argv[k], "--local")) eo.localhost_only = 1;
+        else if (!strcmp(argv[k], "--wait")) continue; /* accepted for older agent files */
+        else if (!strcmp(argv[k], "--film") && k + 1 < argc) {
+            if (parse_film(argv[++k], &eo.film)) { fprintf(stderr, "bad film type\n"); return 2; }
+        } else { usage(); return 2; }
+    }
+    if (s) {
+        if (check(dsd4_initialize(s, fw_check, on_progress, NULL), s, "initialize")) return 1;
+        done_progress();
+    }
+    return dsd4_escl_serve(s, &eo) ? 1 : 0;
+}
+
+#define AGENT_LABEL "org.dsdual4.airscan"
+
+static int launchctl(const char *verb, const char *arg, int quiet)
+{
+    char cmd[PATH_MAX + 128];
+    snprintf(cmd, sizeof cmd, "/bin/launchctl %s %s%s", verb, arg, quiet ? " >/dev/null 2>&1" : "");
+    return system(cmd);
+}
+
+static int cmd_service(int argc, char **argv)
+{
+    const char *op = argc > 1 ? argv[1] : "status";
+    char dom[64], svc[128], plist[PATH_MAX];
+    snprintf(dom, sizeof dom, "gui/%u", (unsigned)getuid());
+    snprintf(svc, sizeof svc, "%s/%s", dom, AGENT_LABEL);
+    const char *home = getenv("HOME");
+    snprintf(plist, sizeof plist, "%s/Library/LaunchAgents/%s.plist", home ? home : "", AGENT_LABEL);
+    if (access(plist, R_OK)) snprintf(plist, sizeof plist, "/Library/LaunchAgents/%s.plist", AGENT_LABEL);
+    int loaded = launchctl("print", svc, 1) == 0;
+    if (!strcmp(op, "status")) {
+        printf("Image Capture service: %s\n", loaded ? "running" : "stopped");
+        if (loaded) printf("  settings page: http://localhost:8090/\n  log: ~/Library/Logs/dsdual4.log\n");
+        return loaded ? 0 : 3;
+    }
+    if (!strcmp(op, "start")) {
+        if (access(plist, R_OK)) { fprintf(stderr, "dsdual4: service not installed (%s)\n", plist); return 1; }
+        launchctl("enable", svc, 1);
+        char a[PATH_MAX + 80];
+        snprintf(a, sizeof a, "%s '%s'", dom, plist);
+        if (!loaded && launchctl("bootstrap", a, 0)) return 1;
+        printf("Image Capture service started\n");
+        return 0;
+    }
+    if (!strcmp(op, "stop")) {
+        if (loaded && launchctl("bootout", svc, 0)) return 1;
+        launchctl("disable", svc, 1);
+        printf("Image Capture service stopped (run \"dsdual4 service start\" to turn it back on)\n");
+        return 0;
+    }
+    usage();
+    return 2;
+}
+
 static int cmd_convert(int argc, char **argv)
 {
     const char *in = NULL, *out = NULL;
@@ -974,6 +1050,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "-v", 2)) g_verbose += (int)strlen(argv[i]) - 1;
         else if (!strcmp(argv[i], "-q")) g_verbose = 0;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(); return 0; }
+        else if (!strcmp(argv[i], "--version")) { printf("dsdual4 %s (%s)\n", DSD4_VERSION, DSD4_COMMIT); return 0; }
         else { fprintf(stderr, "unknown option %s\n", argv[i]); usage(); return 2; }
     }
     const char *cmd = i < argc ? argv[i] : "menu";
@@ -985,6 +1062,8 @@ int main(int argc, char **argv)
     if (!no_profile) load_profile(argv[0], profile);
 
     if (!strcmp(cmd, "convert")) return cmd_convert(cargc, cargv);
+    if (!strcmp(cmd, "service")) return cmd_service(cargc, cargv);
+    if (!strcmp(cmd, "serve") && !use_sim) return cmd_serve(NULL, fw_check, cargc, cargv);
 
     char err[256] = "";
     dsd4 *s = NULL;
@@ -1091,21 +1170,7 @@ int main(int argc, char **argv)
             }
         }
     } else if (!strcmp(cmd, "serve")) {
-        dsd4_escl_options eo = { .port = 8090, .film = DSD4_FILM_POSITIVE_COLOR, .icc = g_icc, .icc_len = g_icc_len,
-                                  .icc_n = g_icc_n, .icc_n_len = g_icc_n_len };
-        for (int k = 1; k < cargc; k++) {
-            if (!strcmp(cargv[k], "--port") && k + 1 < cargc) eo.port = atoi(cargv[++k]);
-            else if (!strcmp(cargv[k], "--name") && k + 1 < cargc) eo.name = cargv[++k];
-            else if (!strcmp(cargv[k], "--local")) eo.localhost_only = 1;
-            else if (!strcmp(cargv[k], "--wait")) continue;
-            else if (!strcmp(cargv[k], "--film") && k + 1 < cargc) {
-                if (parse_film(cargv[++k], &eo.film)) { fprintf(stderr, "bad film type\n"); rc = 2; goto out; }
-            } else { usage(); rc = 2; goto out; }
-        }
-        if (!(rc = check(dsd4_initialize(s, fw_check, on_progress, NULL), s, "initialize"))) {
-            done_progress();
-            rc = dsd4_escl_serve(s, &eo) ? 1 : 0;
-        }
+        rc = cmd_serve(s, fw_check, cargc, cargv);
     } else {
         usage();
         rc = 2;

@@ -4,12 +4,13 @@
 <dict>
     <key>Label</key>
     <string>org.dsdual4.airscan</string>
+    <!-- Image Capture bridge: listed only while the scanner is plugged in;
+         opens it only while scanning, so the dsdual4 menu still works -->
     <key>ProgramArguments</key>
     <array>
-        <string>@BIN@</string>
-        <string>serve</string>
-        <string>--local</string>
-        <string>--wait</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>mkdir -p "$HOME/Library/Logs"; exec "@BIN@" serve --local 2>>"$HOME/Library/Logs/dsdual4.log"</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -17,7 +18,7 @@
     <true/>
     <key>ThrottleInterval</key>
     <integer>10</integer>
-    <key>StandardErrorPath</key>
-    <string>@LOG@</string>
+    <key>ProcessType</key>
+    <string>Background</string>
 </dict>
 </plist>

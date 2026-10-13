@@ -16,9 +16,15 @@ typedef struct {
     size_t icc_len;
     const void *icc_n;      /* Nega Input profile for Minolta-processed colour negatives */
     size_t icc_n_len;
+    /* shared mode: s == NULL; the server opens the USB scanner only while it
+     * scans and advertises itself only while the scanner is attached, so the
+     * menu / command line can use the scanner the rest of the time */
+    void (*on_open)(dsd4 *s, void *ud); /* configure a freshly opened scanner (logging...) */
+    void *ud;
 } dsd4_escl_options;
 
-/* Runs forever (until the process is terminated). */
+/* Runs forever (until the process is terminated).  s: an already open scanner
+ * (kept open), or NULL for shared mode. */
 int dsd4_escl_serve(dsd4 *s, const dsd4_escl_options *o);
 
 #endif
