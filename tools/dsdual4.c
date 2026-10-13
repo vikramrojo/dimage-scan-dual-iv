@@ -853,7 +853,7 @@ static int run_menu(dsd4 *s, int fw_check)
     dsd4_default_params(&cfg.p);
     cfg.p.dpi = 3200;
     int display_scans = 0, open_after = 1, initialized = 0;
-    int neg_mode = NEG_INVERT, use_profile = g_icc != NULL;
+    int neg_mode = NEG_MINOLTA, use_profile = g_icc != NULL;
     preview_cfg pv = { 800, 1, NEG_MINOLTA };
     menu_state ms = { &cfg, &neg_mode, &display_scans, &open_after, &use_profile, &pv, outdir, sizeof outdir };
     load_settings(&ms);

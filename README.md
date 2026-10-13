@@ -87,9 +87,10 @@ Scans are linear 16-bit device RGB. Colour slide scans embed Konica Minolta's
 The scanner itself never inverts negatives. There are three ways to handle
 them:
 
-* **Minolta processing:** the original software's pipeline. It runs
-  autofocus, an auto-exposure prescan, a rescan at the chosen exposure, and
-  the original film curves. Colour results embed `MLTF3200n.icc`.
+* **Minolta processing** (the default in the menu and Image Capture): the
+  original software's pipeline. It runs autofocus, an auto-exposure prescan,
+  a rescan at the chosen exposure, and the original film curves. Colour
+  results embed `MLTF3200n.icc`.
 * **Simple invert:** works in density, like the film itself. It removes the
   orange mask and balances the channels' contrast.
 * **Raw:** keeps the negative as scanned, for Negative Lab Pro, darktable and
