@@ -276,8 +276,16 @@ int dsd4_preview_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, d
 int dsd4_scan_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_minolta_info *info,
                       dsd4_progress_fn cb, void *ud)
 {
+    return dsd4_scan_minolta_hdr(s, sp, 0, img, info, NULL, cb, ud);
+}
+
+int dsd4_scan_minolta_hdr(dsd4 *s, const dsd4_scan_params *sp, double ev, dsd4_image *img,
+                          dsd4_minolta_info *info, dsd4_hdr_info *hdr, dsd4_progress_fn cb, void *ud)
+{
     memset(img, 0, sizeof *img);
     if (info) memset(info, 0, sizeof *info);
+    if (hdr) memset(hdr, 0, sizeof *hdr);
+    if (ev < 0 || ev > 6 || (ev > 0 && sp->preview)) return DSD4_ERR_PARAM;
     if (sp->film != DSD4_FILM_NEGATIVE_COLOR && sp->film != DSD4_FILM_NEGATIVE_BW) return DSD4_ERR_PARAM;
     const int color = sp->film == DSD4_FILM_NEGATIVE_COLOR;
     dsd4_scan_params p = *sp;
@@ -332,14 +340,16 @@ int dsd4_scan_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4
         dsd4_logf(s, 1, "Minolta AE: exposure %.3f/%.3f/%.3f", gain[0], gain[1], gain[2]);
     }
 
-    /* 6. final scan at the AE exposure, then the film curves */
+    /* 6. final scan at the AE exposure (HDR: plus a brighter second pass,
+     * merged), then the film curves */
     dsd4_scan_params fp = p;
     fp.preview = 0;
     fp.bits = 16;
     fp.float_out = sp->float_out; /* multi-sampled DNGs keep their precision */
     fp.raw = 0;
     for (int c = 0; c < 3; c++) fp.exposure[c] = gain[c];
-    if ((r = dsd4_scan(s, &fp, img, cb, ud))) { free(tabs); return r; }
+    r = ev > 0 ? dsd4_scan_hdr(s, &fp, ev, img, hdr, cb, ud) : dsd4_scan(s, &fp, img, cb, ud);
+    if (r) { free(tabs); return r; }
     if (cb) cb(ud, "applying film curves", -1);
     apply_lut(img, final_tab);
     free(tabs);

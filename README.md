@@ -124,7 +124,7 @@ macOS all open it.
 
   Positive DNGs are tagged to show as they are: no extra contrast curve or
   black clip from Apple's raw engine or Lightroom. Multi-sampling keeps their
-  float precision. HDR DNGs stay raw.
+  float precision, and HDR works with both.
 
 These don't add resolution. The Dual IV's sensor and line steps are fixed,
 so every pass samples the same points. Multi-sampling and HDR improve the

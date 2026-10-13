@@ -5,6 +5,8 @@
   imgcheck.py neutral IN.tiff            mean |R-G|, |B-G| (fraction of full scale)
   imgcheck.py noise CLEAN NOISY [dark]   rms difference (green), optionally only
                                          where CLEAN < dark
+  imgcheck.py hpnoise CLEAN NOISY        per-channel noise from adjacent-pixel
+                                         differences (ignores slow offsets)
   imgcheck.py dng IN.dng                 DNG structure summary
   imgcheck.py inner IN.tiff MARGIN       mean (green) inside a MARGIN-pixel border
   imgcheck.py mean IN.bmp                mean level of a 24-bit BMP (0..1), e.g. a
@@ -79,6 +81,22 @@ def main():
                     s += (b[i] - a[i]) ** 2
                     k += 1
         print('%.6f %d' % ((s / k) ** 0.5 if k else -1, k))
+    elif cmd == 'hpnoise':
+        # per-channel noise of b against reference a, from the difference of
+        # horizontally adjacent pixels: cancels the scene and slow offsets
+        # (a noisy AE prescan shifting the film curves slightly)
+        _, w, h, spp, a = read(sys.argv[2])
+        _, _, _, _, b = read(sys.argv[3])
+        out = []
+        for c in range(spp):
+            s, k = 0.0, 0
+            for y in range(8, h - 8):
+                for x in range(8, w - 9):
+                    i = (y * w + x) * spp + c
+                    s += ((b[i] - a[i]) - (b[i + spp] - a[i + spp])) ** 2
+                    k += 1
+            out.append('%.6f' % (s / k / 2) ** 0.5)
+        print(' '.join(out))
     elif cmd == 'dng':
         t, w, h, spp, v = read(sys.argv[2])
         print('DNGVersion %s photometric %d %dx%d spp %d bps %d sampleformat %d colormatrix %s neutral %s' % (

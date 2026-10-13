@@ -425,11 +425,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         return 1;
     }
     /* DNG is the scanner's raw data: no curves or display conversion, and
-     * negatives are only inverted on request (a positive sRGB DNG) */
-    if (o->minolta && negative && o->hdr_ev > 0) {
-        fprintf(stderr, "dsdual4: HDR DNGs stay raw; use Minolta processing without --hdr\n");
-        return 1;
-    }
+     * negatives are only inverted on request (a positive sRGB or Minolta DNG) */
     const int minolta = o->minolta && negative;
     const int invert = o->invert;
     if (dng) {
@@ -438,7 +434,8 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     }
     dsd4_hdr_info hi;
     int r;
-    if (o->hdr_ev > 0) r = dsd4_scan_hdr(s, &p, o->hdr_ev, &im, &hi, on_progress, NULL);
+    if (minolta && o->hdr_ev > 0) r = dsd4_scan_minolta_hdr(s, &p, o->hdr_ev, &im, &mi, &hi, on_progress, NULL);
+    else if (o->hdr_ev > 0) r = dsd4_scan_hdr(s, &p, o->hdr_ev, &im, &hi, on_progress, NULL);
     else if (minolta && p.preview) r = dsd4_preview_minolta(s, &p, &im, &mi, on_progress, NULL);
     else if (minolta) r = dsd4_scan_minolta(s, &p, &im, &mi, on_progress, NULL);
     else r = dsd4_scan(s, &p, &im, on_progress, NULL);

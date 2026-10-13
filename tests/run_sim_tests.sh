@@ -181,8 +181,19 @@ if swiftc -O tests/raw_render.swift -o "$OUT/raw_render" 2>"$OUT/rr.log"; then
     echo "     B&W raw DNG, float vs integer as macOS shows them: dE mean $bde max $bmax"
     check bw-float-dng-on-macos eval 'gt 0.5 "$bde" && gt 1 "$bmax"' 
 else echo "FAIL raw_render (build)"; failn=$((failn+1)); fi
-if "$BIN" --sim -q scan --film nega --minolta --hdr --format dng -o "$OUT/x.dng" >/dev/null 2>&1; then
-    echo "FAIL minolta-hdr accepted"; failn=$((failn+1)); else echo "ok   minolta-hdr-refused"; pass=$((pass+1)); fi
+# Minolta + HDR: the film curves on the merged scan; the same picture as a
+# single-pass Minolta DNG, with less noise in the dense parts of the negative
+DSD4_SIM_FILM=nega run mdng-hdr-clean 390x585 scan --film nega --minolta --dpi 400 --focus 37 --hdr --format dng -o "$OUT/mdng-hdr-clean.dng"
+DSD4_SIM_FILM=nega DSD4_SIM_NOISE=0.01 run mdng-noisy 390x585 scan --film nega --minolta --dpi 400 --focus 37 --format dng -o "$OUT/mdng-noisy.dng"
+DSD4_SIM_FILM=nega DSD4_SIM_NOISE=0.01 run mdng-hdr 390x585 -v scan --film nega --minolta --dpi 400 --focus 37 --hdr --format dng -o "$OUT/mdng-hdr.dng"
+check minolta-hdr-curves grep -q "Minolta DNG (film curves applied)" "$OUT/mdng-hdr.log"
+mc=$($IC noise "$OUT/mdng-nega.dng" "$OUT/mdng-hdr-clean.dng" | cut -d' ' -f1)
+# (green: red's long pass clips on an orange-mask negative the AE already fills)
+mn=$($IC hpnoise "$OUT/mdng-nega.dng" "$OUT/mdng-noisy.dng" | cut -d' ' -f2)
+mh=$($IC hpnoise "$OUT/mdng-nega.dng" "$OUT/mdng-hdr.dng" | cut -d' ' -f2)
+echo "     Minolta HDR DNG vs single pass: rms $mc (noiseless); green noise $mn -> $mh"
+check minolta-hdr-matches gt 0.002 "$mc"
+check minolta-hdr-less-noise gt "$(awk -v a="$mn" 'BEGIN{print a*0.85}')" "$mh"
 
 # --- super-resolution research: the measurements recover the simulated optics
 export DSD4_SIM_CHART=star

@@ -176,6 +176,12 @@ typedef struct {
 } dsd4_hdr_info;
 int  dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *p, double ev, dsd4_image *img, dsd4_hdr_info *info,
                    dsd4_progress_fn cb, void *ud);
+/* (p->raw = 0: the merged image gets the digital gain a normal scan applies) */
+
+/* dsd4_scan_minolta with an HDR final scan (ev > 0; ev = 0: a normal one):
+ * the film curves are applied to the merged, float image.  hdr may be NULL. */
+int  dsd4_scan_minolta_hdr(dsd4 *s, const dsd4_scan_params *p, double ev, dsd4_image *img,
+                           dsd4_minolta_info *info, dsd4_hdr_info *hdr, dsd4_progress_fn cb, void *ud);
 
 /* Linear DNG ("raw") output for raw converters (Lightroom, darktable, Negative
  * Lab Pro).  16-bit images are written as integers.  Float images: float_bits
