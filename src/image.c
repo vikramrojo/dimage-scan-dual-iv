@@ -126,22 +126,65 @@ void dsd4_to_display(dsd4_image *im)
  * Densities relative to the base are normalised to that range per channel,
  * which removes the mask and the channels' different contrast, then mapped
  * back to linear light over a 2.0 density (about 6.6 stop) range.
- * auto_levels 0 uses the extreme values instead of percentiles. */
+ * The percentiles come from the frame only: edge rows and columns averaging
+ * more than 2.0 above the base are the holder's opaque edges, which a
+ * full-frame scan includes; counted as image they would be its densest part
+ * and squeeze the picture into the shadows.  They invert to white.
+ * auto_levels 0 uses the extreme values instead of percentiles.  Float
+ * images (multi-sampling, HDR) find the percentiles on a 16-bit histogram
+ * and map every sample exactly, keeping their precision. */
+static int inv_bin(const dsd4_image *img, size_t k)
+{
+    if (img->bits == 32) {
+        float v = ((const float *)img->data)[k] * 65535.0f;
+        return v > 0 ? v < 65535 ? (int)(v + 0.5f) : 65535 : 0;
+    }
+    return img->bits == 16 ? ((const uint16_t *)img->data)[k] : img->data[k];
+}
+
 void dsd4_invert_negative(dsd4_image *img, int auto_levels)
 {
-    if (img->bits != 8 && img->bits != 16) return;
-    const int ch = img->channels;
-    const size_t n = (size_t)img->width * img->height;
-    const int max = img->bits == 16 ? 65535 : 255;
+    if (img->bits != 8 && img->bits != 16 && img->bits != 32) return;
+    const int ch = img->channels, fl = img->bits == 32, w = img->width, h = img->height;
+    const size_t n = (size_t)w * h;
+    const int max = img->bits == 8 ? 255 : 65535;
     const double R = 2.0, lfloor = pow(10, -R);
     uint32_t *hist = malloc(((size_t)max + 1) * sizeof *hist);
     uint16_t *lut = malloc(((size_t)max + 1) * sizeof *lut);
-    if (!hist || !lut) { free(hist); free(lut); return; }
+    double *rows = calloc((size_t)h, sizeof *rows), *cols = calloc((size_t)w, sizeof *cols);
+    if (!hist || !lut || !rows || !cols) { free(hist); free(lut); free(rows); free(cols); return; }
+
+    /* the frame inside the holder, against the film base of the whole scan */
+    double base_sum = 0;
     for (int c = 0; c < ch; c++) {
         memset(hist, 0, ((size_t)max + 1) * sizeof *hist);
-        for (size_t i = 0; i < n; i++)
-            hist[img->bits == 16 ? ((uint16_t *)img->data)[i * ch + c] : img->data[i * ch + c]]++;
-        const size_t tail = auto_levels ? n / 200 : 0;
+        for (size_t i = 0; i < n; i++) hist[inv_bin(img, i * ch + c)]++;
+        size_t acc = 0, tail = auto_levels ? n / 200 : 0;
+        int hi = max;
+        while (hi > 0 && acc + hist[hi] <= tail) acc += hist[hi--];
+        base_sum += hi;
+    }
+    const double opaque = base_sum / 100;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            for (int c = 0; c < ch; c++) rows[y] += inv_bin(img, ((size_t)y * w + x) * ch + c);
+    int x0 = 0, x1 = w, y0 = 0, y1 = h;
+    while (y0 < y1 && rows[y0] / w < opaque) y0++;
+    while (y1 > y0 && rows[y1 - 1] / w < opaque) y1--;
+    for (int y = y0; y < y1; y++)
+        for (int x = 0; x < w; x++)
+            for (int c = 0; c < ch; c++) cols[x] += inv_bin(img, ((size_t)y * w + x) * ch + c);
+    while (x0 < x1 && cols[x0] / (y1 - y0) < opaque) x0++;
+    while (x1 > x0 && cols[x1 - 1] / (y1 - y0) < opaque) x1--;
+    if (x1 - x0 < w / 4 || y1 - y0 < h / 4) { x0 = 0; x1 = w; y0 = 0; y1 = h; }
+    const size_t nb = (size_t)(x1 - x0) * (y1 - y0);
+
+    float *fd = (float *)img->data;
+    for (int c = 0; c < ch; c++) {
+        memset(hist, 0, ((size_t)max + 1) * sizeof *hist);
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) hist[inv_bin(img, ((size_t)y * w + x) * ch + c)]++;
+        const size_t tail = auto_levels ? nb / 200 : 0;
         size_t acc = 0;
         int lo = 0, hi = max;
         while (lo < max && acc + hist[lo] <= tail) acc += hist[lo++];
@@ -150,6 +193,16 @@ void dsd4_invert_negative(dsd4_image *img, int auto_levels)
         const double base = hi > 0 ? hi : 1, dense = lo > 0 ? lo : 0.5;
         double dmax = log10(base / dense);
         if (dmax < 0.05) dmax = 0.05;
+        if (fl) {
+            for (size_t i = 0; i < n; i++) {
+                size_t k = i * ch + c;
+                double v = fd[k] * 65535.0;
+                double d = log10(base / (v > 0.5 ? v : 0.5)) / dmax;
+                d = d < 0 ? 0 : d > 1 ? 1 : d;
+                fd[k] = (float)((pow(10, R * (d - 1)) - lfloor) / (1 - lfloor));
+            }
+            continue;
+        }
         for (int v = 0; v <= max; v++) {
             double d = log10(base / (v > 0 ? v : 0.5)) / dmax;
             d = d < 0 ? 0 : d > 1 ? 1 : d;
@@ -164,6 +217,9 @@ void dsd4_invert_negative(dsd4_image *img, int auto_levels)
     }
     free(hist);
     free(lut);
+    free(rows);
+    free(cols);
+    img->inverted = 1;
 }
 
 /* Minimal TIFF reader: one IFD, uncompressed, chunky, 8/16 bit, 1 or 3

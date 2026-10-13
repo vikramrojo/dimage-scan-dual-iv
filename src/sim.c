@@ -59,6 +59,7 @@ typedef struct {
     /* test conditions (environment, see sim_open) */
     double noise;       /* DSD4_SIM_NOISE: read noise sigma, fraction of full scale */
     int nega;           /* DSD4_SIM_FILM=nega: neutral scene on orange-mask negative film */
+    double border;      /* DSD4_SIM_BORDER: opaque holder edge this wide (3200 dpi px) */
     double shift;       /* DSD4_SIM_SHIFT: carriage offset (lines) of every second image scan */
     int outlier;        /* DSD4_SIM_OUTLIER=n: every n-th line read is disturbed */
     int star;           /* DSD4_SIM_CHART=star: fine detail beyond Nyquist through a lens PSF */
@@ -179,6 +180,7 @@ static void make_line(sim_t *m, uint8_t *out, uint32_t line)
             double v = (m->star ? star_pixel(m, xx, yy, c, blur)
                         : m->nega ? nega_chart(xx, yy, c, blur) : chart(xx, yy, c, blur)) *
                        (m->exp[c] ? m->exp[c] / 142.857 : 1.0);
+            if (xx < m->border || xx > 3120 - m->border || yy < m->border || yy > 4680 - m->border) v = 0;
             if (m->noise > 0) v += m->noise * gauss(m);
             if (disturbed) v += 0.25;
             if (v < 0) v = 0;
@@ -461,6 +463,7 @@ dsd4_transport *dsd4_sim_open(const char *firmware_path, char *err, size_t errle
     const char *ev;
     if ((ev = getenv("DSD4_SIM_NOISE"))) m->noise = atof(ev);
     if ((ev = getenv("DSD4_SIM_FILM"))) m->nega = !strcmp(ev, "nega");
+    if ((ev = getenv("DSD4_SIM_BORDER"))) m->border = atof(ev);
     if ((ev = getenv("DSD4_SIM_SHIFT"))) m->shift = atof(ev);
     if ((ev = getenv("DSD4_SIM_OUTLIER"))) m->outlier = atoi(ev);
     if ((ev = getenv("DSD4_SIM_CHART"))) m->star = !strcmp(ev, "star");

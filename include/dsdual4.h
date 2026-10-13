@@ -106,6 +106,8 @@ typedef struct {
     int focus;                /* focus position used */
     double raw_gain[3];       /* raw scans: the gain normal output would have
                                  applied (white balance for raw converters) */
+    int inverted;             /* 1: a negative turned positive by
+                                 dsd4_invert_negative (no longer scanner colour) */
 } dsd4_image;
 
 /* lifecycle */
@@ -178,7 +180,10 @@ int  dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *p, double ev, dsd4_image *im
  * float; darktable/RawTherapee, not macOS), or 0 (rounded to 16-bit integer).
  * icc: the scanner's input profile (MLTF3200p.icc, "Posi Linear"); its
  * matrix becomes the DNG colour matrix and its per-channel curves are applied
- * to the samples.  NULL: built-in matrix, linear curves. */
+ * to the samples.  NULL: built-in matrix, linear curves.  An inverted
+ * negative (img->inverted) is written as a linear sRGB positive instead:
+ * the scanner's colour calibration describes the light through the film,
+ * not the inverted picture. */
 int  dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, const void *icc, size_t icc_len);
 
 /* Diagnostics for multi-pass super-resolution ("dsdual4 research"): which =
@@ -199,7 +204,8 @@ int  dsd4_read_tiff(const char *path, dsd4_image *img);
 
 /* simple post-processing helpers for raw scans */
 /* negative -> positive in density space: film base (orange mask) removal and
- * per-channel contrast matching.  Linear output (8/16 bit). */
+ * per-channel contrast matching.  Linear output (8/16 bit or float); sets
+ * img->inverted. */
 void dsd4_invert_negative(dsd4_image *img, int auto_levels);
 int  dsd4_write_tiff(const dsd4_image *img, const char *path);
 /* same, embedding an ICC profile (TIFF tag 34675) when icc != NULL */

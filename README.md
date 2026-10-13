@@ -63,6 +63,7 @@ dsdual4 scan --frame 3 --dpi 3200 -o s.tiff  # 16-bit TIFF
 dsdual4 scan --film nega --minolta -o n.tiff # negative, original Minolta processing
 dsdual4 scan --format dng --samples 8 -o r.dng   # raw DNG, 8x multi-sampled
 dsdual4 scan --format dng --hdr -o h.dng     # raw DNG, two exposures merged
+dsdual4 scan --film nega --invert --format dng -o p.dng   # negative as a positive DNG
 dsdual4 scan-all -o roll                     # roll-1.tiff ... roll-6.tiff
 dsdual4 convert raw.tiff --film bw-nega -o out.tiff   # process an existing raw negative
 dsdual4 eject | home | reset | autofocus | info
@@ -112,6 +113,12 @@ macOS all open it.
 * **HDR** (`--hdr`): a second pass 2 stops brighter, aligned to the first
   to within a fraction of a line and merged. This gives about 4× less noise
   in the dense areas: slide shadows, and negative highlights.
+* **Negatives** stay negative, for Negative Lab Pro and other raw converters
+  that invert them. Add `--invert`, or choose **Negatives → simple invert**,
+  for a positive DNG that Photos and Preview show directly. It is the simple
+  invert above, kept linear (and float, with multi-sampling or HDR), and
+  stored as linear sRGB: the scanner's calibration describes the light
+  through the film, not the inverted picture. Minolta processing is TIFF only.
 
 These don't add resolution. The Dual IV's sensor and line steps are fixed,
 so every pass samples the same points. Multi-sampling and HDR improve the
