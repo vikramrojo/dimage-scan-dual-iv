@@ -16,6 +16,7 @@
 #include <time.h>
 
 static int g_verbose = 1;
+static int g_last_focus = DSD4_FOCUS_AUTO; /* focus of the last scan / autofocus (AUTO = none yet) */
 static uint8_t *g_icc;      /* scanner input profile (MLTF3200p.icc, "Posi Linear") */
 static size_t g_icc_len;
 static char g_icc_path[PATH_MAX];
@@ -353,6 +354,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     if (minolta && g_verbose >= 1)
         fprintf(stderr, "Minolta processing: AE exposure %.3f/%.3f/%.3f, black level %d/%d/%d\n", mi.exposure[0],
                 mi.exposure[1], mi.exposure[2], mi.black_level[0], mi.black_level[1], mi.black_level[2]);
+    g_last_focus = im.focus;
     if (o->invert && !minolta) dsd4_invert_negative(&im, 1);
     if (o->display) dsd4_to_display(&im);
     if (o->fx) flip_x(&im);
@@ -457,6 +459,13 @@ static void open_in_preview(const char *path)
 }
 
 enum { NEG_RAW = 0, NEG_INVERT = 1, NEG_MINOLTA = 2 };
+
+/* preview settings (Device & output settings -> Preview) */
+typedef struct {
+    int dpi;        /* 100..800 */
+    int autofocus;  /* 1: autofocus every preview, 0: reuse the last focus */
+    int neg_raw;    /* negatives: 0 simple invert, 1 show the raw negative */
+} preview_cfg;
 static const char *neg_mode_name(int m)
 {
     static const char *n[] = { "raw negative (invert later yourself)", "simple invert",
@@ -534,7 +543,32 @@ static void scan_settings(scan_opts *c, int *neg_mode)
     }
 }
 
-static void device_settings(scan_opts *c, int *display, int *open_after, int *use_profile, char *outdir, size_t outlen)
+static void preview_settings(preview_cfg *pv)
+{
+    for (;;) {
+        printf("\n    %sPreview%s\n", C("1"), C("0"));
+        printf("      1  Resolution  %d dpi%s\n", pv->dpi, pv->dpi < 800 ? " (faster)" : "");
+        printf("      2  Focus       %s\n", pv->autofocus ? "autofocus every preview" : "skip autofocus (reuse last focus)");
+        printf("      3  Negatives   %s\n", pv->neg_raw ? "show the raw negative" : "simple invert");
+        char b[32];
+        if (ask("    Change which (Enter = back)? ", b, sizeof b) < 0 || !*b) return;
+        switch (b[0]) {
+        case '1': {
+            printf("      1 = 100, 2 = 200, 3 = 400, 4 = 800 dpi, or type any dpi 50-800\n");
+            static const int d[] = { 100, 200, 400, 800 };
+            int v = ask_int("      Resolution", pv->dpi, 1, 800);
+            pv->dpi = v <= 4 ? d[v - 1] : v < 50 ? 50 : v;
+            break;
+        }
+        case '2': pv->autofocus = ask_int("      1 = autofocus, 0 = skip", pv->autofocus, 0, 1); break;
+        case '3': pv->neg_raw = ask_int("      Negatives: 0 = simple invert, 1 = raw", pv->neg_raw, 0, 1); break;
+        default: printf("      unknown choice\n");
+        }
+    }
+}
+
+static void device_settings(scan_opts *c, int *display, int *open_after, int *use_profile, char *outdir, size_t outlen,
+                            preview_cfg *pv)
 {
     for (;;) {
         char focus[32];
@@ -548,6 +582,8 @@ static void device_settings(scan_opts *c, int *display, int *open_after, int *us
         printf("    5  Open in Preview  %s\n", *open_after ? "after every scan" : "previews only");
         printf("    6  Output folder    %s\n", outdir);
         printf("    7  Colour profile   %s\n", !g_icc ? "not found" : *use_profile ? "embed scanner profile" : "off");
+        printf("    8  Preview          %d dpi, %s, negatives %s\n", pv->dpi, pv->autofocus ? "autofocus" : "no autofocus",
+               pv->neg_raw ? "raw" : "inverted");
         char b[PATH_MAX];
         if (ask("  Change which (Enter = done)? ", b, sizeof b) < 0 || !*b) return;
         switch (b[0]) {
@@ -573,6 +609,9 @@ static void device_settings(scan_opts *c, int *display, int *open_after, int *us
                 if (*b) snprintf(outdir, outlen, "%s", b);
             }
             break;
+        case '8':
+            preview_settings(pv);
+            break;
         case '7':
             if (!g_icc) printf("    No profile found (see --profile).\n");
             else *use_profile = ask_int("    Embed the scanner profile in colour slide scans? 1 = yes", *use_profile, 0, 1);
@@ -594,6 +633,7 @@ static int run_menu(dsd4 *s, int fw_check)
     cfg.p.dpi = 3200;
     int display_scans = 0, open_after = 1, initialized = 0;
     int neg_mode = NEG_INVERT, use_profile = g_icc != NULL;
+    preview_cfg pv = { 800, 1, 0 };
     char last[PATH_MAX] = "";
     dsd4_info info;
     int have_info = dsd4_get_info(s, &info) == DSD4_OK;
@@ -637,7 +677,7 @@ static int run_menu(dsd4 *s, int fw_check)
         const char *need_scan = NULL;
         struct { char key; const char *label; const char *blocked; } items[] = {
             { 'i', "Initialize (warm up lamp and calibrate)", NULL },
-            { 'p', initialized ? "Preview a frame (800 dpi, opens in Preview)"
+            { 'p', initialized ? "Preview a frame (opens in Preview)"
                                : "Preview a frame (initializes first)", need_scan },
             { 's', "Scan a frame", need_scan },
             { 'a', "Scan all frames", need_scan },
@@ -719,6 +759,7 @@ static int run_menu(dsd4 *s, int fw_check)
                     !check(dsd4_autofocus(s, &o.p, &best, on_progress, NULL), s, "autofocus")) {
                     done_progress();
                     printf("  best focus position for frame %d: %d\n", fr, best);
+                    g_last_focus = best;
                     if (ask_int("  Use it for the following scans? 1 = yes, 0 = no", 1, 0, 1)) cfg.p.focus = best;
                 }
                 break;
@@ -727,6 +768,14 @@ static int run_menu(dsd4 *s, int fw_check)
             o.display = key == 'p' ? 1 : display_scans;
             apply_neg_mode(&o, neg_mode);
             o.no_profile = !use_profile;
+            if (key == 'p') {
+                o.p.dpi = pv.dpi;
+                o.minolta = 0; /* the Minolta pipeline is for full scans */
+                o.invert = is_negative(o.p.film) && !pv.neg_raw;
+                if (!pv.autofocus)
+                    o.p.focus = g_last_focus != DSD4_FOCUS_AUTO ? g_last_focus
+                              : cfg.p.focus != DSD4_FOCUS_AUTO ? cfg.p.focus : 0;
+            }
             char path[PATH_MAX];
             snprintf(path, sizeof path, "%s/%s-frame%d-%s.tiff", outdir, key == 'p' ? "preview" : "scan", fr, stamp);
             if (do_scan(s, &o, path) == 0) {
@@ -766,7 +815,7 @@ static int run_menu(dsd4 *s, int fw_check)
             scan_settings(&cfg, &neg_mode);
             break;
         case 'd':
-            device_settings(&cfg, &display_scans, &open_after, &use_profile, outdir, sizeof outdir);
+            device_settings(&cfg, &display_scans, &open_after, &use_profile, outdir, sizeof outdir, &pv);
             break;
         case 'r':
             break;

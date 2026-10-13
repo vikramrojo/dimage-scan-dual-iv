@@ -472,8 +472,11 @@ static void av_scan_parameter(dsd4 *s, const line_setting *ls, sp_t *p)
     uint16_t w = 0, h = 0;
     switch (ls->mode) {
     case MODE_PREVIEW:
-        p->xres = p->yres = a[1].dpi;
-        w = (uint16_t)a[1].w; h = (uint16_t)a[1].h;
+        /* the original previews at the image ability's 800 dpi; lower
+         * previews use the scanner's native 100/200/400 dpi steps */
+        p->xres = p->yres = ls->dpi ? ls->dpi : a[1].dpi;
+        w = ls->w ? (uint16_t)ls->w : (uint16_t)a[1].w;
+        h = ls->h ? (uint16_t)ls->h : (uint16_t)a[1].h;
         break;
     case MODE_INDEX:
         p->xres = p->yres = a[2].dpi;
@@ -862,7 +865,8 @@ int dsd4_scan(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4_progres
     image_ability(ls.format_aps, a);
     int out_dpi = sp->preview ? (sp->dpi > 0 && sp->dpi < a[1].dpi ? sp->dpi : a[1].dpi) : sp->dpi;
     if (out_dpi < 50 || out_dpi > 3200) return DSD4_ERR_PARAM;
-    int scan_dpi = sp->preview ? a[1].dpi : (out_dpi <= 800 ? 800 : out_dpi <= 1600 ? 1600 : 3200);
+    int scan_dpi = sp->preview ? (out_dpi <= 100 ? 100 : out_dpi <= 200 ? 200 : out_dpi <= 400 ? 400 : a[1].dpi)
+                               : (out_dpi <= 800 ? 800 : out_dpi <= 1600 ? 1600 : 3200);
     const double k = (double)scan_dpi / out_dpi;
 
     /* area at the scan resolution */
