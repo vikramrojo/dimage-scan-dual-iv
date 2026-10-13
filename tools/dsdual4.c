@@ -422,11 +422,13 @@ static int run_menu(dsd4 *s, int fw_check)
         printf(" Output     %s\n", outdir);
         printf("%s──────────────────────────────────────────────────────%s\n", C("2"), C("0"));
 
-        const char *need_init = initialized ? NULL : "initialize first";
-        const char *need_scan = need_init ? need_init : holder_ok ? NULL : "insert a holder";
+        /* scanning is never blocked up front: the action initialises if needed
+         * and re-checks the holder at the moment it runs */
+        const char *need_scan = NULL;
         struct { char key; const char *label; const char *blocked; } items[] = {
             { 'i', "Initialize (warm up lamp and calibrate)", NULL },
-            { 'p', "Preview a frame (800 dpi, opens in Preview)", need_scan },
+            { 'p', initialized ? "Preview a frame (800 dpi, opens in Preview)"
+                               : "Preview a frame (initializes first)", need_scan },
             { 's', "Scan a frame", need_scan },
             { 'a', "Scan all frames", need_scan },
             { 'f', "Autofocus a frame", need_scan },
@@ -463,6 +465,30 @@ static int run_menu(dsd4 *s, int fw_check)
         char stamp[32];
         strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", localtime(&now));
 
+        if (key == 'p' || key == 's' || key == 'a' || key == 'f') {
+            if (!initialized) {
+                printf("  Initializing first...\n");
+                if (check(dsd4_initialize(s, fw_check, on_progress, NULL), s, "initialize")) continue;
+                done_progress();
+                initialized = 1;
+            }
+            /* fresh holder status; wait while a tray is still being pulled in */
+            holder_ok = 0;
+            for (int t = 0; t < 8 && !holder_ok; t++) {
+                memset(&h, 0, sizeof h);
+                hr = dsd4_get_holder(s, &h);
+                holder_ok = h.holder != DSD4_HOLDER_NONE && h.frames > 0;
+                if (!holder_ok) {
+                    if (t == 0) printf("  Waiting for the holder...\n");
+                    sleep(2);
+                }
+            }
+            if (!holder_ok) {
+                printf("  No holder detected. Push it in until the scanner grabs it, close the\n"
+                       "  door, and try again (h for instructions).\n");
+                continue;
+            }
+        }
         switch (key) {
         case 'i':
             printf("  Warming up and calibrating (best with no holder inserted)...\n");
