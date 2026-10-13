@@ -37,6 +37,28 @@ make test                     # end-to-end tests against the built-in simulator
 sudo make install FIRMWARE="../DS_Dual4_extracted/DS Dual4/Firmware/DS_Dual4.BIN"
 ```
 
+## Interactive menu
+
+Run `dsdual4` with no arguments for a guided menu:
+
+```
+ Scanner    KONICA MINOLTA FS-V31, firmware 1.02
+ Calibrated yes
+ Holder     35 mm film strip, 6 frames (at frame 1)
+ Settings   colour slide (positive), 3200 dpi, 16-bit linear, focus auto
+  i  Initialize (warm up lamp and calibrate)
+  p  Preview a frame (800 dpi, opens in Preview)
+  s  Scan a frame
+  ...
+```
+
+It waits for the scanner to be connected, shows its status, and greys out
+options until they can be used (scanning needs Initialize and a detected
+holder). Previews are saved display-ready and opened in Preview. Scans go to
+`~/Pictures/dsdual4`. `h` prints step-by-step instructions, and Settings
+changes the film type, resolution, focus, multi-sampling, flip and output
+folder.
+
 ## Using the command line tool
 
 ```sh

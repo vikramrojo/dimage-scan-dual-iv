@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <time.h>
 
 static int g_verbose = 1;
 static int g_progress_tty;
@@ -19,7 +21,8 @@ static int g_progress_tty;
 static void usage(void)
 {
     fprintf(stderr,
-"usage: dsdual4 [global options] <command> [command options]\n"
+"usage: dsdual4                      interactive menu with instructions\n"
+"       dsdual4 [global options] <command> [command options]\n"
 "\n"
 "commands:\n"
 "  info                      scanner identification and capabilities\n"
@@ -174,11 +177,39 @@ static int rotate90(dsd4_image *im)
     return 0;
 }
 
+/* linear 16-bit -> 8-bit with gamma 2.2 and a 0.1 %/99.9 % stretch per image,
+ * so the file looks right in Preview */
+static void to_display(dsd4_image *im)
+{
+    size_t n = (size_t)im->width * im->height * im->channels;
+    if (im->bits != 16) return;
+    uint16_t *p = (uint16_t *)im->data;
+    static uint32_t hist[65536];
+    memset(hist, 0, sizeof hist);
+    for (size_t i = 0; i < n; i++) hist[p[i]]++;
+    size_t tail = n / 1000, acc = 0;
+    int lo = 0, hi = 65535;
+    while (lo < 65535 && acc + hist[lo] <= tail) acc += hist[lo++];
+    acc = 0;
+    while (hi > lo && acc + hist[hi] <= tail) acc += hist[hi--];
+    if (hi - lo < 256) { lo = 0; hi = 65535; }
+    uint8_t lut[65536];
+    for (int v = 0; v < 65536; v++) {
+        double x = (double)(v - lo) / (hi - lo);
+        x = x < 0 ? 0 : x > 1 ? 1 : x;
+        lut[v] = (uint8_t)(pow(x, 1 / 2.2) * 255 + 0.5);
+    }
+    for (size_t i = 0; i < n; i++) im->data[i] = lut[p[i]];
+    im->bits = 8;
+    im->stride = (size_t)im->width * im->channels;
+}
+
 typedef struct {
     dsd4_scan_params p;
     const char *out;
     int invert, fx, fy, rot;
     double ev;
+    int display;      /* 8-bit sRGB-like gamma output for viewing */
 } scan_opts;
 
 static int parse_scan_opts(int argc, char **argv, scan_opts *o)
@@ -246,6 +277,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     done_progress();
     if (check(r, s, p.preview ? "preview" : "scan")) return 1;
     if (o->invert) dsd4_invert_negative(&im, 1);
+    if (o->display) to_display(&im);
     if (o->fx) flip_x(&im);
     if (o->fy) flip_y(&im);
     if (o->rot == 90 || o->rot == 180 || o->rot == 270) {
@@ -256,12 +288,256 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         }
     }
     r = dsd4_write_tiff(&im, path);
+    if (r != DSD4_OK) {
+        fprintf(stderr, "dsdual4: cannot write %s\n", path);
+        dsd4_image_free(&im);
+        return 1;
+    }
     if (g_verbose >= 1)
         fprintf(stderr, "wrote %s: %dx%d, %d-bit %s, %d dpi, focus %d, digital gain %.2f/%.2f/%.2f\n",
                 path, im.width, im.height, im.bits, im.channels == 3 ? "RGB" : "gray", im.dpi, im.focus,
                 im.digital_gain[0], im.digital_gain[1], im.digital_gain[2]);
     dsd4_image_free(&im);
-    return check(r, s, "write");
+    return 0;
+}
+
+
+/* ------------------------------------------------------------------ menu */
+
+static int g_color;
+#define C(code) (g_color ? "\033[" code "m" : "")
+
+static int ask(const char *prompt, char *buf, size_t n)
+{
+    printf("%s", prompt);
+    fflush(stdout);
+    if (!fgets(buf, (int)n, stdin)) return -1;
+    buf[strcspn(buf, "\r\n")] = 0;
+    return 0;
+}
+
+static int ask_int(const char *prompt, int def, int lo, int hi)
+{
+    char b[64], pr[256];
+    snprintf(pr, sizeof pr, "%s [%d]: ", prompt, def);
+    for (;;) {
+        if (ask(pr, b, sizeof b) < 0) return def;
+        if (!*b) return def;
+        char *e;
+        long v = strtol(b, &e, 10);
+        if (!*e && v >= lo && v <= hi) return (int)v;
+        printf("  please enter a number from %d to %d\n", lo, hi);
+    }
+}
+
+static void menu_help(void)
+{
+    printf("\n%sHow to use the DiMAGE Scan Dual IV%s\n\n"
+"  1. Connect the scanner by USB and switch it on. Wait until its light stops\n"
+"     blinking.\n"
+"  2. Choose \"Initialize\" once per power-on. The lamp warms up and the scanner\n"
+"     calibrates (best with no holder inserted). This takes 15 s to 2 minutes.\n"
+"  3. Load film into the FH-U1 strip holder (or slides into the SH-U1 holder),\n"
+"     open the front door and push the holder in, arrow first, until the\n"
+"     scanner grabs it. Choose \"Refresh\" to see it detected.\n"
+"  4. Pick the film type in Settings (slide, colour negative, B&W).\n"
+"  5. \"Preview\" makes a quick 800 dpi view of one frame and opens it in\n"
+"     Preview. \"Scan\" makes the full-resolution file.\n"
+"  6. \"Eject\" returns the holder when you are done.\n\n"
+"  Files are saved in the output folder (Settings). Full scans are linear\n"
+"  16-bit TIFFs for editing: they look dark until you apply a curve. Choose\n"
+"  \"display-ready\" in Settings for files that look right straight away.\n"
+"  If an image is mirrored, turn on \"flip horizontally\" in Settings.\n\n"
+"  The same functions are available as commands, e.g. dsdual4 scan --frame 2\n"
+"  -o out.tiff (see dsdual4 --help). Image Capture / Preview can also scan\n"
+"  directly while \"dsdual4 serve\" is running.\n\n", C("1"), C("0"));
+}
+
+static const char *film_name(dsd4_film f)
+{
+    static const char *n[] = { "colour slide (positive)", "colour negative", "B&W positive", "B&W negative" };
+    return n[f];
+}
+
+static void open_in_preview(const char *path)
+{
+    char cmd[PATH_MAX + 32];
+    if (getenv("DSD4_NO_OPEN")) { printf("  (would open %s)\n", path); return; }
+    snprintf(cmd, sizeof cmd, "open -a Preview '%s'", path);
+    if (system(cmd) != 0) printf("  could not open %s\n", path);
+}
+
+static int run_menu(dsd4 *s, int fw_check)
+{
+    g_color = isatty(1);
+    char outdir[PATH_MAX];
+    const char *home = getenv("HOME");
+    snprintf(outdir, sizeof outdir, "%s/Pictures/dsdual4", home ? home : ".");
+    scan_opts cfg = { 0 };
+    dsd4_default_params(&cfg.p);
+    cfg.p.dpi = 3200;
+    int display_scans = 0, open_after = 1, initialized = 0;
+    char last[PATH_MAX] = "";
+    dsd4_info info;
+    int have_info = dsd4_get_info(s, &info) == DSD4_OK;
+
+    printf("\n%sdsdual4%s - Konica Minolta DiMAGE Scan Dual IV\n", C("1"), C("0"));
+    printf("Type the letter or number of an option. 'h' shows instructions.\n");
+    for (;;) {
+        dsd4_holder_info h;
+        memset(&h, 0, sizeof h);
+        int hr = dsd4_get_holder(s, &h);
+        int holder_ok = hr == DSD4_OK && h.holder != DSD4_HOLDER_NONE && h.frames > 0;
+        static const char *hn[] = { "none", "35 mm film strip", "35 mm slides", "APS", "unknown" };
+
+        printf("\n%s──────────────────────────────────────────────────────%s\n", C("2"), C("0"));
+        if (have_info) {
+            char name[32] = "";
+            int k = 0;
+            for (int q = 8; q < 32 && k < 30; q++) /* "KONICA MINOLTA  FS-V31  " */
+                if (info.inquiry[q] != ' ' || (k && name[k - 1] != ' ')) name[k++] = (char)info.inquiry[q];
+            while (k && name[k - 1] == ' ') k--;
+            name[k] = 0;
+            printf(" Scanner    %s, firmware %s\n", name, info.revision);
+        }
+        printf(" Calibrated %s\n", initialized ? "yes" : "no - choose Initialize");
+        if (holder_ok) printf(" Holder     %s, %d frames (at frame %d)\n", hn[h.holder], h.frames, h.current_frame);
+        else printf(" Holder     not detected - push it in until the scanner grabs it\n");
+        printf(" Settings   %s, %d dpi, %s, focus %s\n", film_name(cfg.p.film), cfg.p.dpi,
+               display_scans ? "display-ready 8-bit" : "16-bit linear",
+               cfg.p.focus == DSD4_FOCUS_AUTO ? "auto" : "manual");
+        printf(" Output     %s\n", outdir);
+        printf("%s──────────────────────────────────────────────────────%s\n", C("2"), C("0"));
+
+        const char *need_init = initialized ? NULL : "initialize first";
+        const char *need_scan = need_init ? need_init : holder_ok ? NULL : "insert a holder";
+        struct { char key; const char *label; const char *blocked; } items[] = {
+            { 'i', "Initialize (warm up lamp and calibrate)", NULL },
+            { 'p', "Preview a frame (800 dpi, opens in Preview)", need_scan },
+            { 's', "Scan a frame", need_scan },
+            { 'a', "Scan all frames", need_scan },
+            { 'f', "Autofocus a frame", need_scan },
+            { 'o', "Open the last file in Preview", *last ? NULL : "nothing scanned yet" },
+            { 'e', "Eject the holder", holder_ok ? NULL : "no holder" },
+            { 'c', "Settings", NULL },
+            { 'r', "Refresh status", NULL },
+            { 'h', "Instructions", NULL },
+            { 'q', "Quit", NULL },
+        };
+        for (size_t k = 0; k < sizeof items / sizeof *items; k++) {
+            if (items[k].blocked)
+                printf("  %s%c  %-46s (%s)%s\n", C("2"), items[k].key, items[k].label, items[k].blocked, C("0"));
+            else
+                printf("  %s%c%s  %s\n", C("1"), items[k].key, C("0"), items[k].label);
+        }
+        char b[64];
+        if (ask("> ", b, sizeof b) < 0) return 0;
+        char key = b[0];
+        const char *blocked = NULL;
+        for (size_t k = 0; k < sizeof items / sizeof *items; k++)
+            if (items[k].key == key) blocked = items[k].blocked;
+        if (blocked) { printf("  not available yet: %s\n", blocked); continue; }
+
+        { /* mkdir -p */
+            char tmp[PATH_MAX];
+            snprintf(tmp, sizeof tmp, "%s", outdir);
+            for (char *q = tmp + 1; *q; q++)
+                if (*q == '/') { *q = 0; mkdir(tmp, 0755); *q = '/'; }
+            mkdir(tmp, 0755);
+        }
+        time_t now = time(NULL);
+        char stamp[32];
+        strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", localtime(&now));
+
+        switch (key) {
+        case 'i':
+            printf("  Warming up and calibrating (best with no holder inserted)...\n");
+            if (!check(dsd4_initialize(s, fw_check, on_progress, NULL), s, "initialize")) {
+                done_progress();
+                initialized = 1;
+                printf("  %sScanner ready.%s\n", C("32"), C("0"));
+            }
+            break;
+        case 'p': case 's': case 'f': {
+            int fr = ask_int("  Frame", h.current_frame > 0 && h.current_frame <= h.frames ? h.current_frame : 1, 1, h.frames);
+            scan_opts o = cfg;
+            o.p.frame = fr;
+            if (key == 'f') {
+                int best = 0;
+                if (!check(dsd4_select_frame(s, fr), s, "frame") &&
+                    !check(dsd4_autofocus(s, &o.p, &best, on_progress, NULL), s, "autofocus")) {
+                    done_progress();
+                    printf("  best focus position for frame %d: %d\n", fr, best);
+                    if (ask_int("  Use it for the following scans? 1 = yes, 0 = no", 1, 0, 1)) cfg.p.focus = best;
+                }
+                break;
+            }
+            o.p.preview = key == 'p';
+            o.display = key == 'p' ? 1 : display_scans;
+            if (o.p.film == DSD4_FILM_NEGATIVE_COLOR || o.p.film == DSD4_FILM_NEGATIVE_BW) o.invert = 1;
+            char path[PATH_MAX];
+            snprintf(path, sizeof path, "%s/%s-frame%d-%s.tiff", outdir, key == 'p' ? "preview" : "scan", fr, stamp);
+            if (do_scan(s, &o, path) == 0) {
+                snprintf(last, sizeof last, "%s", path);
+                if (key == 'p' || open_after) open_in_preview(path);
+            }
+            break;
+        }
+        case 'a':
+            for (int fr = 1; fr <= h.frames; fr++) {
+                scan_opts o = cfg;
+                o.p.frame = fr;
+                o.display = display_scans;
+                if (o.p.film == DSD4_FILM_NEGATIVE_COLOR || o.p.film == DSD4_FILM_NEGATIVE_BW) o.invert = 1;
+                char path[PATH_MAX];
+                snprintf(path, sizeof path, "%s/scan-frame%d-%s.tiff", outdir, fr, stamp);
+                printf("  frame %d of %d\n", fr, h.frames);
+                if (do_scan(s, &o, path)) break;
+                snprintf(last, sizeof last, "%s", path);
+            }
+            break;
+        case 'o':
+            open_in_preview(last);
+            break;
+        case 'e':
+            if (!check(dsd4_eject(s), s, "eject")) printf("  Holder ejected.\n");
+            break;
+        case 'c': {
+            printf("  Film type: 1 colour slide, 2 colour negative, 3 B&W positive, 4 B&W negative\n");
+            cfg.p.film = (dsd4_film)(ask_int("  Film type", (int)cfg.p.film + 1, 1, 4) - 1);
+            static const int dpis[] = { 400, 800, 1600, 3200 };
+            printf("  Resolution: 1 = 400, 2 = 800, 3 = 1600, 4 = 3200 dpi (or type any dpi 50-3200)\n");
+            int d = ask_int("  Resolution", cfg.p.dpi, 1, 3200);
+            cfg.p.dpi = d <= 4 ? dpis[d - 1] : d < 50 ? 50 : d;
+            display_scans = ask_int("  Full scans: 0 = 16-bit linear (for editing), 1 = display-ready 8-bit", display_scans, 0, 1);
+            int af = ask_int("  Focus: 0 = autofocus every scan, or a manual position -200..200 (1 keeps current)",
+                             cfg.p.focus == DSD4_FOCUS_AUTO ? 0 : 1, -200, 200);
+            if (af == 0) cfg.p.focus = DSD4_FOCUS_AUTO;
+            else if (af != 1) cfg.p.focus = af;
+            else if (cfg.p.focus == DSD4_FOCUS_AUTO) cfg.p.focus = 0;
+            cfg.p.multi_sample = 1 << ask_int("  Multi-sampling: 0 = off, 1 = 2x, 2 = 4x, 3 = 8x", 0, 0, 3);
+            cfg.fx = ask_int("  Flip horizontally (if scans come out mirrored)? 1 = yes", cfg.fx, 0, 1);
+            open_after = ask_int("  Open full scans in Preview when done? 1 = yes", open_after, 0, 1);
+            char b2[PATH_MAX];
+            printf("  Output folder [%s]: ", outdir);
+            fflush(stdout);
+            if (fgets(b2, sizeof b2, stdin)) {
+                b2[strcspn(b2, "\r\n")] = 0;
+                if (*b2) snprintf(outdir, sizeof outdir, "%s", b2);
+            }
+            break;
+        }
+        case 'r':
+            break;
+        case 'h': case '?':
+            menu_help();
+            break;
+        case 'q':
+            return 0;
+        default:
+            if (*b) printf("  unknown option '%s' (h for instructions)\n", b);
+        }
+    }
 }
 
 int main(int argc, char **argv)
@@ -279,16 +555,16 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(); return 0; }
         else { fprintf(stderr, "unknown option %s\n", argv[i]); usage(); return 2; }
     }
-    if (i >= argc) { usage(); return 2; }
-    const char *cmd = argv[i];
-    int cargc = argc - i;
+    const char *cmd = i < argc ? argv[i] : "menu";
+    if (i >= argc && !isatty(0)) { usage(); return 2; }
+    int cargc = i < argc ? argc - i : 0;
     char **cargv = argv + i;
     g_progress_tty = isatty(2);
     if (!fw) fw = find_firmware(argv[0]);
 
     char err[256] = "";
     dsd4 *s = NULL;
-    int wait = 0;
+    int wait = !strcmp(cmd, "menu");
     for (int k = 1; k < cargc; k++) if (!strcmp(cargv[k], "--wait")) wait = 1;
     if (use_sim) {
         dsd4_transport *t = dsd4_sim_open(fw, err, sizeof err);
@@ -305,7 +581,9 @@ int main(int argc, char **argv)
     if (fw) dsd4_set_firmware_path(s, fw);
 
     int rc = 0;
-    if (!strcmp(cmd, "info")) {
+    if (!strcmp(cmd, "menu")) {
+        rc = run_menu(s, fw_check);
+    } else if (!strcmp(cmd, "info")) {
         dsd4_info in;
         if (check(dsd4_get_info(s, &in), s, "inquiry")) rc = 1;
         else {
