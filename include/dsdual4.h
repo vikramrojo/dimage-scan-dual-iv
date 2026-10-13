@@ -108,6 +108,9 @@ typedef struct {
                                  applied (white balance for raw converters) */
     int inverted;             /* 1: a negative turned positive by
                                  dsd4_invert_negative (no longer scanner colour) */
+    int minolta;              /* 1: Minolta-processed positive (film curves applied;
+                                 colour in MLTF3200n "Nega Input" encoding, gray
+                                 gamma 2.2) */
 } dsd4_image;
 
 /* lifecycle */

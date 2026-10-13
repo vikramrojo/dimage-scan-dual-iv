@@ -23,9 +23,9 @@ def read(path):
     tags = {}
     for i in range(n):
         tag, typ, cnt = struct.unpack_from('<HHI', d, ifd + 2 + 12 * i)
-        size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 10: 8}[typ] * cnt
+        size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 10: 8, 11: 4}[typ] * cnt
         off = ifd + 2 + 12 * i + 8 if size <= 4 else struct.unpack_from('<I', d, ifd + 2 + 12 * i + 8)[0]
-        fmt = {1: 'B', 2: 'c', 3: 'H', 4: 'I', 5: 'II', 7: 'B', 10: 'ii'}[typ]
+        fmt = {1: 'B', 2: 'c', 3: 'H', 4: 'I', 5: 'II', 7: 'B', 10: 'ii', 11: 'f'}[typ]
         if typ in (5, 10):
             v = struct.unpack_from('<' + fmt[0] * (2 * cnt), d, off)
             tags[tag] = [v[2 * k] / v[2 * k + 1] for k in range(cnt)]

@@ -108,7 +108,7 @@ static int inv3(const double m[9], double o[9])
     return 0;
 }
 
-enum { T_BYTE = 1, T_ASCII = 2, T_SHORT = 3, T_LONG = 4, T_RATIONAL = 5, T_SRATIONAL = 10 };
+enum { T_BYTE = 1, T_ASCII = 2, T_SHORT = 3, T_LONG = 4, T_RATIONAL = 5, T_SRATIONAL = 10, T_FLOAT = 11 };
 
 typedef struct {
     uint16_t tag, type;
@@ -132,7 +132,7 @@ static entry_t *add(ifd_t *d, uint16_t tag, uint16_t type, uint32_t count)
     e->tag = tag;
     e->type = type;
     e->count = count;
-    static const uint8_t sz[] = { 0, 1, 1, 2, 4, 8, 0, 0, 0, 0, 8 };
+    static const uint8_t sz[] = { 0, 1, 1, 2, 4, 8, 0, 0, 0, 0, 8, 4 };
     e->len = count * sz[type];
     return e;
 }
@@ -154,6 +154,16 @@ static void add_rational(ifd_t *d, uint16_t tag, uint16_t type, int count, const
     for (int i = 0; i < count; i++) {
         put32(e->data + 8 * i, (uint32_t)(int32_t)lround(v[i] * 10000));
         put32(e->data + 8 * i + 4, 10000);
+    }
+}
+
+static void add_float(ifd_t *d, uint16_t tag, int count, const float *v)
+{
+    entry_t *e = add(d, tag, T_FLOAT, (uint32_t)count);
+    for (int i = 0; i < count; i++) {
+        uint32_t u;
+        memcpy(&u, &v[i], 4);
+        put32(e->data + 4 * i, u);
     }
 }
 
@@ -189,9 +199,13 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     if (img->bits != 16 && img->bits != 32) return DSD4_ERR_PARAM;
     if (img->channels != 1 && img->channels != 3) return DSD4_ERR_PARAM;
     if (float_bits != 0 && float_bits != 16 && float_bits != 32) return DSD4_ERR_PARAM;
-    const int ch = img->channels, fl = img->bits == 32 && float_bits, pos = img->inverted;
+    const int ch = img->channels, fl = img->bits == 32 && float_bits, pos = img->inverted, mino = img->minolta;
     const int bps = fl ? float_bits : 16;
-    const size_t row = (size_t)img->width * ch * (bps / 8);
+    /* Apple's decoder ignores SampleFormat on one-channel DNGs and reads float
+     * samples as integers (Preview showed B&W float DNGs flattened to ~0.2):
+     * gray float images are written as three equal channels, neutral */
+    const int expand = ch == 1 && fl, och = expand ? 3 : ch;
+    const size_t row = (size_t)img->width * och * (bps / 8);
     uint32_t rps = (uint32_t)(row ? (1u << 20) / row : 1);
     if (rps < 1) rps = 1;
     if (rps > (uint32_t)img->height) rps = (uint32_t)img->height;
@@ -203,14 +217,27 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
         double applied = img->digital_gain[c] > 0 ? img->digital_gain[c] : 1;
         double would = img->raw_gain[c] > 0 ? img->raw_gain[c] : applied;
         pend[c] = would / applied;
-        if (!(pend[c] > 0) || pos) pend[c] = 1;
+        if (!(pend[c] > 0) || pos || mino) pend[c] = 1;
     }
     double pmin = ch == 3 ? fmin(pend[0], fmin(pend[1], pend[2])) : pend[0];
+    /* Minolta positives: colour in the Nega Input profile the TIFF embeds
+     * (icc); gray as the gamma 2.2 the TIFF is tagged with.  Their curves turn
+     * the encoded samples back into linear light. */
     profile_t pr;
-    if (pos || !icc || parse_icc((const uint8_t *)icc, icc_len, &pr)) {
-        if (!pos && icc) free_profile(&pr);
+    int srgb = pos;
+    if (pos || (mino && ch == 1) || !icc || parse_icc((const uint8_t *)icc, icc_len, &pr)) {
+        if (!pos && !(mino && ch == 1) && icc) free_profile(&pr);
         memset(&pr, 0, sizeof pr);
-        memcpy(pr.m, pos ? K_SRGB_TO_XYZ : K_CAM_TO_XYZ, sizeof pr.m);
+        srgb = pos || mino;
+        memcpy(pr.m, srgb ? K_SRGB_TO_XYZ : K_CAM_TO_XYZ, sizeof pr.m);
+        if (mino)
+            for (int c = 0; c < 3; c++) { pr.n[c] = 1; pr.gamma[c] = 2.2; }
+    }
+    if (expand) {
+        /* gray in RGB: neutral (sRGB primaries, D65 white, equal gains) */
+        memcpy(pr.m, K_SRGB_TO_XYZ, sizeof pr.m);
+        srgb = 1;
+        pend[1] = pend[2] = pend[0];
     }
 
     ifd_t d = { .n = 0 };
@@ -218,8 +245,8 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     add_long(&d, 256, (uint32_t)img->width);
     add_long(&d, 257, (uint32_t)img->height);
     uint16_t v3[3] = { (uint16_t)bps, (uint16_t)bps, (uint16_t)bps };
-    add_short(&d, 258, ch, v3);
-    uint16_t one = 1, lin = 34892, two = 2, spp = (uint16_t)ch;
+    add_short(&d, 258, och, v3);
+    uint16_t one = 1, lin = 34892, two = 2, spp = (uint16_t)och;
     add_short(&d, 259, 1, &one);
     add_short(&d, 262, 1, &lin);
     add_ascii(&d, 271, "KONICA MINOLTA");
@@ -236,14 +263,14 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     add_short(&d, 296, 1, &two);
     add_ascii(&d, 305, "dsdual4 (DiMAGE Scan Dual IV driver)");
     uint16_t sf[3] = { fl ? 3 : 1, fl ? 3 : 1, fl ? 3 : 1 };
-    add_short(&d, 339, ch, sf);
+    add_short(&d, 339, och, sf);
     entry_t *e = add(&d, 50706, T_BYTE, 4);
     e->data[0] = 1; e->data[1] = 4;
     e = add(&d, 50707, T_BYTE, 4);
     e->data[0] = 1; e->data[1] = fl ? 4 : 1;
     add_ascii(&d, 50708, "Konica Minolta DiMAGE Scan Dual IV");
     add_long(&d, 50717, fl ? 1 : 65535); /* WhiteLevel */
-    if (ch == 3) {
+    if (och == 3) {
         /* camera -> XYZ = K * diag(pend); ColorMatrix1 = its inverse */
         double m[9], inv[9], neutral[3];
         for (int r = 0; r < 3; r++)
@@ -257,9 +284,20 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     }
     double be = log2(pmin);
     add_rational(&d, 50730, T_SRATIONAL, 1, &be); /* BaselineExposure */
-    if (ch == 3) {
-        uint16_t illum = pos ? 21 : 23; /* D65 : D50 */
+    if (och == 3) {
+        uint16_t illum = srgb ? 21 : 23; /* D65 : D50 */
         add_short(&d, 50778, 1, &illum); /* CalibrationIlluminant1 */
+    }
+    if (pos || mino) {
+        /* finished positives: render the data as it is.  Raw converters
+         * otherwise add their own contrast curve and black clip (Apple's raw
+         * engine brightens a linear 0.5 to 0.8); identity ProfileToneCurve and
+         * DefaultBlackRender "none" turn both off in Preview/Photos and
+         * Lightroom alike */
+        static const float ident[4] = { 0, 0, 1, 1 };
+        add_ascii(&d, 50936, mino ? "dsdual4 Minolta film curve" : "dsdual4 inverted"); /* ProfileName */
+        add_float(&d, 50940, 4, ident);  /* ProfileToneCurve */
+        add_long(&d, 51110, 1);          /* DefaultBlackRender: none */
     }
     qsort(d.e, (size_t)d.n, sizeof *d.e, cmp_entry);
 
@@ -336,11 +374,12 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     while ((uint32_t)ftell(f) < data_off) fputc(0, f);
 
     /* pixels, little-endian */
-    const size_t n = (size_t)img->width * img->height * ch;
+    const size_t n = (size_t)img->width * img->height * och;
     uint8_t buf[8192];
     size_t k = 0;
-    for (size_t i = 0; i < n; i++) {
-        const int c = (int)(i % (size_t)ch);
+    for (size_t o = 0; o < n; o++) {
+        const int c = ch == 3 ? (int)(o % 3) : 0;
+        const size_t i = (o / (size_t)och) * (size_t)ch + (size_t)c; /* source sample */
         float fv = 0;
         if (img->bits == 32) {
             fv = ((const float *)img->data)[i];

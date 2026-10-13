@@ -77,13 +77,13 @@ run af-classic  -          autofocus --frame 2 --af classic
 fb=$(awk '/best focus/{print $4}' "$OUT/af-fast.log"); cb=$(awk '/best focus/{print $4}' "$OUT/af-classic.log")
 fm=$(grep -c '^CDB 2a 00 88' "$OUT/af-fast.trace"); cm=$(grep -c '^CDB 2a 00 88' "$OUT/af-classic.trace")
 echo "     autofocus fast $fb ($fm lens moves), classic $cb ($cm lens moves)"
-check af-fast-matches-classic [ -n "$fb" ] && [ $(( fb > cb ? fb - cb : cb - fb )) -le 2 ] && [ "$fm" -lt 40 ]
+check af-fast-matches-classic eval "[ -n \"$fb\" ] && [ $(( fb > cb ? fb - cb : cb - fb )) -le 2 ] && [ \"$fm\" -lt 40 ]"
 
 # --- negatives: density-space inversion of an orange-mask negative is neutral
 DSD4_SIM_FILM=nega run invert-nega 390x585 scan --dpi 400 --film nega --invert --focus 37 -o "$OUT/invert-nega.tiff"
 read -r dr db <<< "$($IC neutral "$OUT/invert-nega.tiff")"
 echo "     inverted neutral scene: |R-G| $dr |B-G| $db"
-check invert-neutral gt 0.02 "$dr" && gt 0.02 "$db"
+check invert-neutral eval "gt 0.02 \"$dr\" && gt 0.02 \"$db\""
 # the holder's opaque edges in a full-frame scan must not count as the
 # negative's densest part (it squeezed the picture into the shadows)
 for f in bw-nega nega; do
@@ -122,7 +122,7 @@ sh=$(sed -n 's/.*offset \(-*[0-9.]*\) lines.*/\1/p' "$OUT/dng-hdr.log")
 nh=$($IC noise "$OUT/dng-raw.dng" "$OUT/dng-hdr.dng" 0.2 | cut -d' ' -f1)
 nd=$($IC noise "$OUT/dng-raw.dng" "$OUT/dng-noisy.dng" 0.2 | cut -d' ' -f1)
 echo "     HDR: pass offset found $sh lines (simulated 0.5); shadow noise $nd -> $nh"
-check hdr-alignment awk -v s="$sh" 'BEGIN { s = s < 0 ? -s : s; exit !(s > 0.4 && s < 0.6) }'
+check hdr-alignment eval "awk -v s=\"$sh\" 'BEGIN { s = s < 0 ? -s : s; exit !(s > 0.4 && s < 0.6) }'"
 check hdr-shadow-noise gt "$nd" "$(awk -v a="$nh" 'BEGIN{print a*3}')"
 # noiseless, unshifted passes: the merge must reproduce the single pass
 # (no bias or seam where the long exposure hands over to the short one)
@@ -158,10 +158,31 @@ m=-1
 sips -s format bmp "$OUT/dng-invert.dng" --out "$OUT/dng-invert-decoded.bmp" >/dev/null 2>&1 &&
     m=$($IC mean "$OUT/dng-invert-decoded.bmp")
 echo "     inverted DNG decoded by macOS: mean level $m"
-check dng-invert-decodes-on-macos awk -v m="$m" 'BEGIN { exit !(m > 0.1 && m < 0.7) }'
-if "$BIN" --sim -q scan --dpi 400 --film nega --minolta --format dng -o "$OUT/no.dng" >/dev/null 2>&1; then
-    echo "FAIL dng-minolta-refused"; failn=$((failn+1))
-else echo "ok   dng-minolta-refused"; pass=$((pass+1)); fi
+check dng-invert-decodes-on-macos eval "awk -v m=\"$m\" 'BEGIN { exit !(m > 0.1 && m < 0.7) }'"
+
+
+# --- Minolta DNG: renders in Preview/Photos like the Minolta TIFF
+if swiftc -O tests/raw_render.swift -o "$OUT/raw_render" 2>"$OUT/rr.log"; then
+    for f in nega bw-nega; do
+        DSD4_SIM_FILM=nega run mdng-$f-tiff 390x585 scan --film $f --minolta --dpi 400 --focus 37 -o "$OUT/mdng-$f-tiff.tiff"
+        DSD4_SIM_FILM=nega run mdng-$f 390x585 scan --film $f --minolta --dpi 400 --focus 37 --format dng -o "$OUT/mdng-$f.dng"
+        DSD4_SIM_FILM=nega DSD4_SIM_NOISE=0.005 run mdng-$f-ms4 390x585 scan --film $f --minolta --dpi 400 --focus 37 --samples 4 --format dng -o "$OUT/mdng-$f-ms4.dng"
+        DSD4_SIM_FILM=nega DSD4_SIM_NOISE=0.005 run mdng-$f-ms4-tiff 390x585 scan --film $f --minolta --dpi 400 --focus 37 --samples 4 -o "$OUT/mdng-$f-ms4-tiff.tiff"
+        read -r de dmax dl <<< "$("$OUT/raw_render" "$OUT/mdng-$f.dng" "$OUT/mdng-$f-tiff.tiff")"
+        read -r de4 dmax4 dl4 <<< "$("$OUT/raw_render" "$OUT/mdng-$f-ms4.dng" "$OUT/mdng-$f-ms4-tiff.tiff")"
+        echo "     Minolta DNG vs TIFF ($f) as Preview shows them: dE mean $de max $dmax; 4x multi-sampled: mean $de4 max $dmax4"
+        check minolta-dng-matches-tiff-$f eval 'gt 2 "$de" && gt 4 "$dmax" && gt 2 "$de4" && gt 4 "$dmax4"' 
+    done
+    check minolta-dng-float grep -q "sampleformat 3" <<< "$($IC dng "$OUT/mdng-nega-ms4.dng")"
+    # B&W float DNGs go out as neutral RGB: Apple misreads one-channel float samples
+    DSD4_SIM_NOISE=0.005 run bwf-half 390x585 scan --film bw-nega --dpi 400 --focus 37 --samples 4 --format dng -o "$OUT/bwf-half.dng"
+    DSD4_SIM_NOISE=0.005 run bwf-int 390x585 scan --film bw-nega --dpi 400 --focus 37 --samples 4 --format dng --dng-bits 16 -o "$OUT/bwf-int.dng"
+    read -r bde bmax bdl <<< "$("$OUT/raw_render" "$OUT/bwf-half.dng" "$OUT/bwf-int.dng")"
+    echo "     B&W raw DNG, float vs integer as macOS shows them: dE mean $bde max $bmax"
+    check bw-float-dng-on-macos eval 'gt 0.5 "$bde" && gt 1 "$bmax"' 
+else echo "FAIL raw_render (build)"; failn=$((failn+1)); fi
+if "$BIN" --sim -q scan --film nega --minolta --hdr --format dng -o "$OUT/x.dng" >/dev/null 2>&1; then
+    echo "FAIL minolta-hdr accepted"; failn=$((failn+1)); else echo "ok   minolta-hdr-refused"; pass=$((pass+1)); fi
 
 # --- super-resolution research: the measurements recover the simulated optics
 export DSD4_SIM_CHART=star
@@ -172,7 +193,7 @@ check research-detects-blur grep -q "G1 detail at the sampling limit: *no" "$OUT
 DSD4_SIM_BREATHING=60 DSD4_SIM_JITTER=0.2 run research-focus - research focus --focus 37
 ppm=$(sed -n 's/.*scale change: \([-0-9.]*\) ppm.*/\1/p' "$OUT/research-focus.log")
 echo "     lens breathing: simulated 60 ppm/step, measured $ppm"
-check research-breathing awk -v p="$ppm" 'BEGIN { exit !(p > 57 && p < 63) }'
+check research-breathing eval "awk -v p=\"$ppm\" 'BEGIN { exit !(p > 57 && p < 63) }'"
 DSD4_SIM_JITTER=0.3 run research-jitter - research jitter --focus 37
 $PY - "$OUT/research-jitter.log" "$OUT/research-jitter.trace" > "$OUT/jitter-check.txt" <<'PYEOF'
 import sys, re

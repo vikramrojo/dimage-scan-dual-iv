@@ -41,11 +41,26 @@ static void ae_base_gain(dsd4_film f, double g[3])
     }
 }
 
-/* ApplyLUT: p[c] = lut[c][p[c]] on interleaved 16 bit samples */
+/* ApplyLUT: p[c] = lut[c][p[c]] on interleaved 16 bit samples.  Float
+ * samples (multi-sampling) are looked up between table entries, keeping
+ * their extra precision. */
 static void apply_lut(dsd4_image *im, uint16_t *const lut[3])
 {
     const size_t n = (size_t)im->width * im->height;
     const int ch = im->channels;
+    if (im->bits == 32) {
+        float *f = (float *)im->data;
+        for (size_t i = 0; i < n; i++)
+            for (int c = 0; c < ch; c++) {
+                double x = f[i * ch + c] * 65535.0;
+                x = x < 0 ? 0 : x > 65535 ? 65535 : x;
+                int k = (int)x;
+                if (k > 65534) k = 65534;
+                double t = x - k;
+                f[i * ch + c] = (float)(((1 - t) * lut[c][k] + t * lut[c][k + 1]) / 65535.0);
+            }
+        return;
+    }
     uint16_t *p = (uint16_t *)im->data;
     for (size_t i = 0; i < n; i++)
         for (int c = 0; c < ch; c++) p[i * ch + c] = lut[c][p[i * ch + c]];
@@ -246,6 +261,7 @@ int dsd4_preview_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, d
         }
     }
     if (sp->bits == 8) to8(img);
+    img->minolta = 1;
     dsd4_logf(s, 1, "Minolta AE: exposure %.3f/%.3f/%.3f", gain[0], gain[1], gain[2]);
     if (info) {
         for (int c = 0; c < 3; c++) {
@@ -320,14 +336,15 @@ int dsd4_scan_minolta(dsd4 *s, const dsd4_scan_params *sp, dsd4_image *img, dsd4
     dsd4_scan_params fp = p;
     fp.preview = 0;
     fp.bits = 16;
-    fp.float_out = 0;
+    fp.float_out = sp->float_out; /* multi-sampled DNGs keep their precision */
     fp.raw = 0;
     for (int c = 0; c < 3; c++) fp.exposure[c] = gain[c];
     if ((r = dsd4_scan(s, &fp, img, cb, ud))) { free(tabs); return r; }
     if (cb) cb(ud, "applying film curves", -1);
     apply_lut(img, final_tab);
     free(tabs);
-    if (sp->bits == 8) to8(img); /* ApplyLUT's 8 bit output: lut value >> 8 */
+    if (sp->bits == 8 && img->bits == 16) to8(img); /* ApplyLUT's 8 bit output: lut value >> 8 */
+    img->minolta = 1;
     if (info) {
         for (int c = 0; c < 3; c++) info->exposure[c] = gain[c];
         info->focus = p.focus;
@@ -369,7 +386,7 @@ int dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_e
     ae_base_gain(film, base);
     const int ich = in->channels, och = color ? 3 : 1;
     const int k = in->dpi > 800 ? (in->dpi + 400) / 800 : 1;
-    dsd4_image pim = { in->width / k, in->height / k, och, 16, 800, 0, NULL, { 1, 1, 1 }, 0, { 1, 1, 1 }, 0 };
+    dsd4_image pim = { in->width / k, in->height / k, och, 16, 800, 0, NULL, { 1, 1, 1 }, 0, { 1, 1, 1 }, 0, 0 };
     pim.stride = (size_t)pim.width * och * 2;
     pim.data = malloc(pim.stride * pim.height);
     if (!pim.data) return DSD4_ERR_NOMEM;
