@@ -38,7 +38,7 @@ make install-agent                     # optional: Image Capture service for thi
 make pkg                               # optional: build/dsdual4-<version>.pkg
 ```
 
-The version number is `1.0.<commit count>`; `dsdual4 --version` shows it.
+The version number is `1.1.<commit count>`; `dsdual4 --version` shows it.
 
 To make a signed release, set `SIGN_APP`, `SIGN_INSTALLER` (your Developer ID
 certificate names) and `NOTARY_PROFILE` (from `xcrun notarytool
