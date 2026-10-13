@@ -249,6 +249,8 @@ typedef struct {
     int invert, fx, fy, rot;
     double ev;
     int display;      /* 8-bit sRGB-like gamma output for viewing */
+    int minolta;      /* negatives: original Minolta processing */
+    int no_profile;   /* do not embed the scanner profile */
 } scan_opts;
 
 static int parse_scan_opts(int argc, char **argv, scan_opts *o)
@@ -327,7 +329,8 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         }
     }
     /* the scanner profile describes linear colour positives only */
-    int embed = g_icc && !o->display && !o->invert && im.channels == 3 && p.film == DSD4_FILM_POSITIVE_COLOR;
+    int embed = g_icc && !o->no_profile && !o->display && !o->invert && im.channels == 3 &&
+                p.film == DSD4_FILM_POSITIVE_COLOR;
     r = dsd4_write_tiff_icc(&im, path, embed ? g_icc : NULL, embed ? g_icc_len : 0);
     if (r != DSD4_OK) {
         fprintf(stderr, "dsdual4: cannot write %s\n", path);
@@ -411,6 +414,133 @@ static void open_in_preview(const char *path)
     if (system(cmd) != 0) printf("  could not open %s\n", path);
 }
 
+enum { NEG_RAW = 0, NEG_INVERT = 1, NEG_MINOLTA = 2 };
+static const char *neg_mode_name(int m)
+{
+    static const char *n[] = { "raw negative (invert later yourself)", "simple invert",
+                               "Minolta processing (original film curves)" };
+    return n[m];
+}
+
+static int is_negative(dsd4_film f) { return f == DSD4_FILM_NEGATIVE_COLOR || f == DSD4_FILM_NEGATIVE_BW; }
+
+/* apply the menu's negative handling to one scan's options */
+static void apply_neg_mode(scan_opts *o, int neg_mode)
+{
+    o->invert = 0;
+    o->minolta = 0;
+    if (!is_negative(o->p.film)) return;
+    if (neg_mode == NEG_INVERT) o->invert = 1;
+    else if (neg_mode == NEG_MINOLTA) o->minolta = 1;
+}
+
+static void area_text(const scan_opts *c, char *b, size_t n)
+{
+    if (c->p.w > 0 && c->p.h > 0) snprintf(b, n, "area %dx%d at %d,%d px", c->p.w, c->p.h, c->p.x, c->p.y);
+    else snprintf(b, n, "full frame");
+}
+
+static void scan_settings(scan_opts *c, int *neg_mode)
+{
+    for (;;) {
+        char area[64];
+        area_text(c, area, sizeof area);
+        printf("\n  %sScan settings%s\n", C("1"), C("0"));
+        printf("    1  Film type     %s\n", film_name(c->p.film));
+        printf("    2  Size          %s\n", area);
+        printf("    3  Resolution    %d dpi\n", c->p.dpi);
+        if (is_negative(c->p.film)) printf("    4  Negatives     %s\n", neg_mode_name(*neg_mode));
+        else printf("    %s4  Negatives     (only for negative film)%s\n", C("2"), C("0"));
+        char b[64];
+        if (ask("  Change which (Enter = done)? ", b, sizeof b) < 0 || !*b) return;
+        switch (b[0]) {
+        case '1':
+            printf("    1 colour slide (positive)  2 colour negative  3 B&W positive  4 B&W negative\n");
+            c->p.film = (dsd4_film)(ask_int("    Film type", (int)c->p.film + 1, 1, 4) - 1);
+            break;
+        case '2':
+            if (ask_int("    1 = full frame, 2 = custom area", c->p.w > 0 ? 2 : 1, 1, 2) == 1) {
+                c->p.x = c->p.y = c->p.w = c->p.h = 0;
+            } else {
+                printf("    Area in pixels at %d dpi (a full 35 mm frame is %d x %d)\n", c->p.dpi,
+                       3120 * c->p.dpi / 3200, 4680 * c->p.dpi / 3200);
+                c->p.x = ask_int("    Left", c->p.x, 0, 4680);
+                c->p.y = ask_int("    Top", c->p.y, 0, 4680);
+                c->p.w = ask_int("    Width", c->p.w > 0 ? c->p.w : 3120 * c->p.dpi / 3200 - c->p.x, 4, 4680);
+                c->p.h = ask_int("    Height", c->p.h > 0 ? c->p.h : 4680 * c->p.dpi / 3200 - c->p.y, 1, 4680);
+            }
+            break;
+        case '3': {
+            static const int dpis[] = { 400, 800, 1600, 3200 };
+            printf("    1 = 400, 2 = 800, 3 = 1600, 4 = 3200 dpi, or type any dpi 50-3200\n");
+            int d = ask_int("    Resolution", c->p.dpi, 1, 3200);
+            c->p.dpi = d <= 4 ? dpis[d - 1] : d < 50 ? 50 : d;
+            break;
+        }
+        case '4':
+            if (!is_negative(c->p.film)) { printf("    Choose a negative film type first.\n"); break; }
+            printf("    1 raw negative - keep the negative as scanned, to invert later in\n"
+                   "      Negative Lab Pro, darktable, ColorPerfect, ...\n"
+                   "    2 simple invert - quick per-channel inversion\n"
+                   "    3 Minolta processing - the original software's auto-exposure and film\n"
+                   "      curves (needs a prescan; tagged with the Nega Input profile)\n");
+            *neg_mode = ask_int("    Negatives", *neg_mode + 1, 1, 3) - 1;
+            break;
+        default:
+            printf("    unknown choice\n");
+        }
+    }
+}
+
+static void device_settings(scan_opts *c, int *display, int *open_after, int *use_profile, char *outdir, size_t outlen)
+{
+    for (;;) {
+        char focus[32];
+        if (c->p.focus == DSD4_FOCUS_AUTO) snprintf(focus, sizeof focus, "autofocus every scan");
+        else snprintf(focus, sizeof focus, "manual, position %d", c->p.focus);
+        printf("\n  %sDevice & output settings%s\n", C("1"), C("0"));
+        printf("    1  Focus            %s\n", focus);
+        printf("    2  Multi-sampling   %s\n", c->p.multi_sample > 1 ? (c->p.multi_sample == 2 ? "2x" : c->p.multi_sample == 4 ? "4x" : "8x") : "off");
+        printf("    3  File format      %s\n", *display ? "display-ready 8-bit" : "16-bit linear (for editing)");
+        printf("    4  Flip horizontal  %s\n", c->fx ? "on" : "off");
+        printf("    5  Open in Preview  %s\n", *open_after ? "after every scan" : "previews only");
+        printf("    6  Output folder    %s\n", outdir);
+        printf("    7  Colour profile   %s\n", !g_icc ? "not found" : *use_profile ? "embed scanner profile" : "off");
+        char b[PATH_MAX];
+        if (ask("  Change which (Enter = done)? ", b, sizeof b) < 0 || !*b) return;
+        switch (b[0]) {
+        case '1': {
+            int v = ask_int("    0 = autofocus, or a manual position -200..200 (blank keeps)",
+                            c->p.focus == DSD4_FOCUS_AUTO ? 0 : c->p.focus, -200, 200);
+            c->p.focus = v == 0 ? DSD4_FOCUS_AUTO : v;
+            break;
+        }
+        case '2': {
+            int k = c->p.multi_sample == 8 ? 3 : c->p.multi_sample == 4 ? 2 : c->p.multi_sample == 2 ? 1 : 0;
+            c->p.multi_sample = 1 << ask_int("    0 = off, 1 = 2x, 2 = 4x, 3 = 8x (less noise, slower)", k, 0, 3);
+            break;
+        }
+        case '3': *display = ask_int("    0 = 16-bit linear, 1 = display-ready 8-bit", *display, 0, 1); break;
+        case '4': c->fx = ask_int("    Flip horizontally? 1 = yes, 0 = no", c->fx, 0, 1); break;
+        case '5': *open_after = ask_int("    Open full scans in Preview? 1 = yes, 0 = no", *open_after, 0, 1); break;
+        case '6':
+            printf("    Output folder [%s]: ", outdir);
+            fflush(stdout);
+            if (fgets(b, sizeof b, stdin)) {
+                b[strcspn(b, "\r\n")] = 0;
+                if (*b) snprintf(outdir, outlen, "%s", b);
+            }
+            break;
+        case '7':
+            if (!g_icc) printf("    No profile found (see --profile).\n");
+            else *use_profile = ask_int("    Embed the scanner profile in colour slide scans? 1 = yes", *use_profile, 0, 1);
+            break;
+        default:
+            printf("    unknown choice\n");
+        }
+    }
+}
+
 static int run_menu(dsd4 *s, int fw_check)
 {
     g_color = isatty(1);
@@ -421,6 +551,7 @@ static int run_menu(dsd4 *s, int fw_check)
     dsd4_default_params(&cfg.p);
     cfg.p.dpi = 3200;
     int display_scans = 0, open_after = 1, initialized = 0;
+    int neg_mode = NEG_INVERT, use_profile = g_icc != NULL;
     char last[PATH_MAX] = "";
     dsd4_info info;
     int have_info = dsd4_get_info(s, &info) == DSD4_OK;
@@ -447,11 +578,16 @@ static int run_menu(dsd4 *s, int fw_check)
         printf(" Calibrated %s\n", initialized ? "yes" : "no - choose Initialize");
         if (holder_ok) printf(" Holder     %s, %d frames (at frame %d)\n", hn[h.holder], h.frames, h.current_frame);
         else printf(" Holder     not detected - push it in until the scanner grabs it\n");
-        printf(" Settings   %s, %d dpi, %s, focus %s\n", film_name(cfg.p.film), cfg.p.dpi,
-               display_scans ? "display-ready 8-bit" : "16-bit linear",
-               cfg.p.focus == DSD4_FOCUS_AUTO ? "auto" : "manual");
-        printf(" Output     %s\n", outdir);
-        printf(" Profile    %s\n", g_icc ? "MLTF3200p.icc embedded in 16-bit slide scans" : "none found (colours not tagged)");
+        {
+            char area[64];
+            area_text(&cfg, area, sizeof area);
+            printf(" Scan       %s, %s, %d dpi%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
+                   is_negative(cfg.p.film) ? ", " : "", is_negative(cfg.p.film) ? neg_mode_name(neg_mode) : "");
+            printf(" Device     focus %s, %s, %s\n", cfg.p.focus == DSD4_FOCUS_AUTO ? "auto" : "manual",
+                   display_scans ? "display-ready 8-bit" : "16-bit linear",
+                   use_profile && g_icc ? "profile embedded" : "no profile");
+            printf(" Output     %s\n", outdir);
+        }
         printf("%s──────────────────────────────────────────────────────%s\n", C("2"), C("0"));
 
         /* scanning is never blocked up front: the action initialises if needed
@@ -467,7 +603,8 @@ static int run_menu(dsd4 *s, int fw_check)
             { 'o', "Open the last file in Preview", *last ? NULL : "nothing scanned yet" },
             { 'e', "Eject the holder", holder_ok ? NULL : "no holder" },
             { 'x', "Reset the scanner (if it reports errors)", NULL },
-            { 'c', "Settings", NULL },
+            { 'c', "Scan settings (film, size, resolution, negatives)", NULL },
+            { 'd', "Device & output settings", NULL },
             { 'r', "Refresh status", NULL },
             { 'h', "Instructions", NULL },
             { 'q', "Quit", NULL },
@@ -546,7 +683,8 @@ static int run_menu(dsd4 *s, int fw_check)
             }
             o.p.preview = key == 'p';
             o.display = key == 'p' ? 1 : display_scans;
-            if (o.p.film == DSD4_FILM_NEGATIVE_COLOR || o.p.film == DSD4_FILM_NEGATIVE_BW) o.invert = 1;
+            apply_neg_mode(&o, neg_mode);
+            o.no_profile = !use_profile;
             char path[PATH_MAX];
             snprintf(path, sizeof path, "%s/%s-frame%d-%s.tiff", outdir, key == 'p' ? "preview" : "scan", fr, stamp);
             if (do_scan(s, &o, path) == 0) {
@@ -560,7 +698,8 @@ static int run_menu(dsd4 *s, int fw_check)
                 scan_opts o = cfg;
                 o.p.frame = fr;
                 o.display = display_scans;
-                if (o.p.film == DSD4_FILM_NEGATIVE_COLOR || o.p.film == DSD4_FILM_NEGATIVE_BW) o.invert = 1;
+                apply_neg_mode(&o, neg_mode);
+            o.no_profile = !use_profile;
                 char path[PATH_MAX];
                 snprintf(path, sizeof path, "%s/scan-frame%d-%s.tiff", outdir, fr, stamp);
                 printf("  frame %d of %d\n", fr, h.frames);
@@ -581,31 +720,12 @@ static int run_menu(dsd4 *s, int fw_check)
         case 'e':
             if (!check(dsd4_eject(s), s, "eject")) printf("  Holder ejected.\n");
             break;
-        case 'c': {
-            printf("  Film type: 1 colour slide, 2 colour negative, 3 B&W positive, 4 B&W negative\n");
-            cfg.p.film = (dsd4_film)(ask_int("  Film type", (int)cfg.p.film + 1, 1, 4) - 1);
-            static const int dpis[] = { 400, 800, 1600, 3200 };
-            printf("  Resolution: 1 = 400, 2 = 800, 3 = 1600, 4 = 3200 dpi (or type any dpi 50-3200)\n");
-            int d = ask_int("  Resolution", cfg.p.dpi, 1, 3200);
-            cfg.p.dpi = d <= 4 ? dpis[d - 1] : d < 50 ? 50 : d;
-            display_scans = ask_int("  Full scans: 0 = 16-bit linear (for editing), 1 = display-ready 8-bit", display_scans, 0, 1);
-            int af = ask_int("  Focus: 0 = autofocus every scan, or a manual position -200..200 (1 keeps current)",
-                             cfg.p.focus == DSD4_FOCUS_AUTO ? 0 : 1, -200, 200);
-            if (af == 0) cfg.p.focus = DSD4_FOCUS_AUTO;
-            else if (af != 1) cfg.p.focus = af;
-            else if (cfg.p.focus == DSD4_FOCUS_AUTO) cfg.p.focus = 0;
-            cfg.p.multi_sample = 1 << ask_int("  Multi-sampling: 0 = off, 1 = 2x, 2 = 4x, 3 = 8x", 0, 0, 3);
-            cfg.fx = ask_int("  Flip horizontally (if scans come out mirrored)? 1 = yes", cfg.fx, 0, 1);
-            open_after = ask_int("  Open full scans in Preview when done? 1 = yes", open_after, 0, 1);
-            char b2[PATH_MAX];
-            printf("  Output folder [%s]: ", outdir);
-            fflush(stdout);
-            if (fgets(b2, sizeof b2, stdin)) {
-                b2[strcspn(b2, "\r\n")] = 0;
-                if (*b2) snprintf(outdir, sizeof outdir, "%s", b2);
-            }
+        case 'c':
+            scan_settings(&cfg, &neg_mode);
             break;
-        }
+        case 'd':
+            device_settings(&cfg, &display_scans, &open_after, &use_profile, outdir, sizeof outdir);
+            break;
         case 'r':
             break;
         case 'h': case '?':
