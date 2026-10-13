@@ -66,6 +66,7 @@ dsdual4 scan --format dng --hdr -o h.dng     # raw DNG, two exposures merged
 dsdual4 scan --film nega --minolta --format dng -o m.dng  # Minolta positive as a DNG
 dsdual4 scan --film nega --invert --format dng -o p.dng   # simple-invert positive DNG
 dsdual4 scan-all -o roll                     # roll-1.tiff ... roll-6.tiff
+dsdual4 scan-all --frames 4 -o roll          # a strip of 4: roll-1 ... roll-4
 dsdual4 convert raw.tiff --film bw-nega -o out.tiff   # process an existing raw negative
 dsdual4 eject | home | reset | autofocus | info
 ```

@@ -71,6 +71,12 @@ PY=${PYTHON:-python3}
 IC="$PY tests/imgcheck.py"
 gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 
+# scan-all of a short strip: only the frames asked for
+run scanall4    -          scan-all --dpi 200 --focus 37 --frames 4 -o "$OUT/strip4"
+check scanall-frames eval '[ -f "$OUT/strip4-4.tiff" ] && [ ! -e "$OUT/strip4-5.tiff" ] && [ -f "$OUT/scanall-6.tiff" ]'
+if DSD4_SIM_TRACE=/dev/null "$BIN" --sim -q scan-all --frames 7 -o "$OUT/x" >/dev/null 2>&1; then
+    echo "FAIL frames-7 accepted"; failn=$((failn+1)); else echo "ok   frames-7-rejected"; pass=$((pass+1)); fi
+
 # --- fast autofocus: same result as the original sequence, far fewer lens moves
 run af-fast     -          autofocus --frame 2 --af fast
 run af-classic  -          autofocus --frame 2 --af classic

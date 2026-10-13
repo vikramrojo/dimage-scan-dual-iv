@@ -73,7 +73,8 @@ static void usage(void)
 "  preview -o file.tiff      800 dpi preview of the current/selected frame\n"
 "                            (negatives: --invert, or --minolta from one scan)\n"
 "  scan -o file.tiff         scan one frame\n"
-"  scan-all -o prefix        scan every frame of the holder (prefix-N.tiff)\n"
+"  scan-all -o prefix        scan every frame of the holder (prefix-N.tiff);\n"
+"                            --frames n: only frames 1..n (a strip of 4)\n"
 "  convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n"
 "                            apply the original Minolta negative processing to\n"
 "                            an existing raw negative scan (no scanner needed)\n"
@@ -332,7 +333,14 @@ typedef struct {
     int dng;          /* raw DNG output */
     double hdr_ev;    /* > 0: HDR second pass (DNG) */
     int dng_bits;     /* float DNG sample size: 0/half = 16-bit float, 32, or 16 = integer only */
+    int frames;       /* scan-all: frames 1..frames (0: every frame of the holder) */
 } scan_opts;
+
+/* frames scan-all covers: the requested count, at most the holder's */
+static int frames_to_scan(const scan_opts *o, const dsd4_holder_info *h)
+{
+    return o->frames > 0 && o->frames < h->frames ? o->frames : h->frames;
+}
 
 static int parse_scan_opts(int argc, char **argv, scan_opts *o)
 {
@@ -342,7 +350,7 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
         { "samples", 1, 0, 's' }, { "invert", 0, 0, 'i' }, { "raw", 0, 0, 'r' }, { "flip-x", 0, 0, 'X' },
         { "flip-y", 0, 0, 'Y' }, { "rotate", 1, 0, 'R' }, { "output", 1, 0, 'o' }, { "minolta", 0, 0, 'M' },
         { "format", 1, 0, 'T' }, { "hdr", 2, 0, 'H' }, { "dng-bits", 1, 0, 'B' }, { "af", 1, 0, 'A' },
-        { 0, 0, 0, 0 },
+        { "frames", 1, 0, 'N' }, { 0, 0, 0, 0 },
     };
     optind = 1;
     int c;
@@ -398,6 +406,10 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
             if (!strcmp(optarg, "fast")) o->p.af_mode = DSD4_AF_FAST;
             else if (!strcmp(optarg, "classic")) o->p.af_mode = DSD4_AF_CLASSIC;
             else { fprintf(stderr, "bad autofocus mode %s (fast or classic)\n", optarg); return -1; }
+            break;
+        case 'N':
+            o->frames = atoi(optarg);
+            if (o->frames < 1 || o->frames > 6) { fprintf(stderr, "bad frame count %s (1-6)\n", optarg); return -1; }
             break;
         default: return -1;
         }
@@ -1033,8 +1045,10 @@ static int run_menu(dsd4 *s, int fw_check)
             }
             break;
         }
-        case 'a':
-            for (int fr = 1; fr <= h.frames; fr++) {
+        case 'a': {
+            /* strips are often cut shorter than the holder's 6 frames */
+            const int nf = h.frames > 2 ? ask_int("  How many frames", h.frames, 2, h.frames) : h.frames;
+            for (int fr = 1; fr <= nf; fr++) {
                 scan_opts o = cfg;
                 o.p.frame = fr;
                 o.display = display_scans;
@@ -1042,11 +1056,12 @@ static int run_menu(dsd4 *s, int fw_check)
             o.no_profile = !use_profile;
                 char path[PATH_MAX];
                 snprintf(path, sizeof path, "%s/scan-frame%d-%s.%s", outdir, fr, stamp, o.dng ? "dng" : "tiff");
-                printf("  frame %d of %d\n", fr, h.frames);
+                printf("  frame %d of %d\n", fr, nf);
                 if (do_scan(s, &o, path)) break;
                 snprintf(last, sizeof last, "%s", path);
             }
             break;
+        }
         case 'o':
             open_in_preview(last);
             break;
@@ -1333,11 +1348,12 @@ int main(int argc, char **argv)
         else if (!(rc = check(dsd4_initialize(s, fw_check, on_progress, NULL), s, "initialize"))) {
             dsd4_holder_info h;
             if (!(rc = check(dsd4_get_holder(s, &h), s, "holder"))) {
-                for (int f = 1; f <= h.frames && !rc; f++) {
+                const int nf = frames_to_scan(&o, &h);
+                for (int f = 1; f <= nf && !rc; f++) {
                     char path[PATH_MAX];
                     snprintf(path, sizeof path, "%s-%d.%s", o.out, f, o.dng ? "dng" : "tiff");
                     o.p.frame = f;
-                    if (g_verbose >= 1) fprintf(stderr, "frame %d/%d\n", f, h.frames);
+                    if (g_verbose >= 1) fprintf(stderr, "frame %d/%d\n", f, nf);
                     rc = do_scan(s, &o, path);
                 }
             }
