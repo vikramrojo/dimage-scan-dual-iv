@@ -622,6 +622,71 @@ static void device_settings(scan_opts *c, int *display, int *open_after, int *us
     }
 }
 
+/* menu settings persist in ~/Library/Application Support/dsdual4/menu.conf */
+typedef struct {
+    scan_opts *cfg;
+    int *neg_mode, *display, *open_after, *use_profile;
+    preview_cfg *pv;
+    char *outdir;
+    size_t outlen;
+} menu_state;
+
+static void settings_path(char *b, size_t n)
+{
+    const char *home = getenv("HOME");
+    snprintf(b, n, "%s/Library/Application Support/dsdual4/menu.conf", home ? home : ".");
+}
+
+static void save_settings(const menu_state *m)
+{
+    char path[PATH_MAX], dir[PATH_MAX];
+    settings_path(path, sizeof path);
+    snprintf(dir, sizeof dir, "%s", path);
+    *strrchr(dir, '/') = 0;
+    for (char *q = dir + 1; *q; q++)
+        if (*q == '/') { *q = 0; mkdir(dir, 0755); *q = '/'; }
+    mkdir(dir, 0755);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    const dsd4_scan_params *p = &m->cfg->p;
+    fprintf(f, "film=%d\ndpi=%d\narea=%d,%d,%d,%d\nnegatives=%d\nfocus=%d\nsamples=%d\ndisplay=%d\n"
+               "flip=%d\nopen_after=%d\nprofile=%d\npreview_dpi=%d\npreview_af=%d\npreview_neg_raw=%d\noutdir=%s\n",
+            (int)p->film, p->dpi, p->x, p->y, p->w, p->h, *m->neg_mode, p->focus, p->multi_sample, *m->display,
+            m->cfg->fx, *m->open_after, *m->use_profile, m->pv->dpi, m->pv->autofocus, m->pv->neg_raw, m->outdir);
+    fclose(f);
+}
+
+static void load_settings(menu_state *m)
+{
+    char path[PATH_MAX], line[PATH_MAX + 32];
+    settings_path(path, sizeof path);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    dsd4_scan_params *p = &m->cfg->p;
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *v = strchr(line, '=');
+        if (!v) continue;
+        *v++ = 0;
+        int i = atoi(v);
+        if (!strcmp(line, "film") && i >= 0 && i <= 3) p->film = (dsd4_film)i;
+        else if (!strcmp(line, "dpi") && i >= 50 && i <= 3200) p->dpi = i;
+        else if (!strcmp(line, "area")) sscanf(v, "%d,%d,%d,%d", &p->x, &p->y, &p->w, &p->h);
+        else if (!strcmp(line, "negatives") && i >= 0 && i <= 2) *m->neg_mode = i;
+        else if (!strcmp(line, "focus")) p->focus = i;
+        else if (!strcmp(line, "samples") && (i == 1 || i == 2 || i == 4 || i == 8)) p->multi_sample = i;
+        else if (!strcmp(line, "display")) *m->display = i != 0;
+        else if (!strcmp(line, "flip")) m->cfg->fx = i != 0;
+        else if (!strcmp(line, "open_after")) *m->open_after = i != 0;
+        else if (!strcmp(line, "profile")) *m->use_profile = i != 0 && g_icc;
+        else if (!strcmp(line, "preview_dpi") && i >= 50 && i <= 800) m->pv->dpi = i;
+        else if (!strcmp(line, "preview_af")) m->pv->autofocus = i != 0;
+        else if (!strcmp(line, "preview_neg_raw")) m->pv->neg_raw = i != 0;
+        else if (!strcmp(line, "outdir") && *v) snprintf(m->outdir, m->outlen, "%s", v);
+    }
+    fclose(f);
+}
+
 static int run_menu(dsd4 *s, int fw_check)
 {
     g_color = isatty(1);
@@ -634,6 +699,8 @@ static int run_menu(dsd4 *s, int fw_check)
     int display_scans = 0, open_after = 1, initialized = 0;
     int neg_mode = NEG_INVERT, use_profile = g_icc != NULL;
     preview_cfg pv = { 800, 1, 0 };
+    menu_state ms = { &cfg, &neg_mode, &display_scans, &open_after, &use_profile, &pv, outdir, sizeof outdir };
+    load_settings(&ms);
     char last[PATH_MAX] = "";
     dsd4_info info;
     int have_info = dsd4_get_info(s, &info) == DSD4_OK;
@@ -760,7 +827,10 @@ static int run_menu(dsd4 *s, int fw_check)
                     done_progress();
                     printf("  best focus position for frame %d: %d\n", fr, best);
                     g_last_focus = best;
-                    if (ask_int("  Use it for the following scans? 1 = yes, 0 = no", 1, 0, 1)) cfg.p.focus = best;
+                    if (ask_int("  Use it for the following scans? 1 = yes, 0 = no", 1, 0, 1)) {
+                        cfg.p.focus = best;
+                        save_settings(&ms);
+                    }
                 }
                 break;
             }
@@ -813,9 +883,11 @@ static int run_menu(dsd4 *s, int fw_check)
             break;
         case 'c':
             scan_settings(&cfg, &neg_mode);
+            save_settings(&ms);
             break;
         case 'd':
             device_settings(&cfg, &display_scans, &open_after, &use_profile, outdir, sizeof outdir, &pv);
+            save_settings(&ms);
             break;
         case 'r':
             break;
