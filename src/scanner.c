@@ -337,6 +337,21 @@ int dsd4_home(dsd4 *s)
     return DSD4_OK;
 }
 
+int dsd4_reset(dsd4 *s, int seconds)
+{
+    if (s->scanning) avl_stop_scan(s);
+    avl_reset_to_initial_state(s, 0); /* may be refused while the holder is moving */
+    for (int t = 0; t < seconds * 2; t++) {
+        if (av_test_unit_ready(s)) {
+            s->base_state = 0;
+            s->carriage_out = 0;
+            return DSD4_OK;
+        }
+        av_delay_ticks(30);
+    }
+    return fail(s);
+}
+
 int dsd4_set_focus(dsd4 *s, int pos)
 {
     if (pos < -250 || pos > 250) return DSD4_ERR_PARAM;

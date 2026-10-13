@@ -117,6 +117,9 @@ int  dsd4_initialize(dsd4 *s, int allow_firmware_update, dsd4_progress_fn cb, vo
 int  dsd4_select_frame(dsd4 *s, int frame);
 int  dsd4_eject(dsd4 *s);
 int  dsd4_home(dsd4 *s);
+/* SEND 0x92 (reset to initial state), then wait up to 'seconds' until the
+ * scanner answers TEST UNIT READY. Clears calibration state in this session. */
+int  dsd4_reset(dsd4 *s, int seconds);
 int  dsd4_set_focus(dsd4 *s, int position);
 int  dsd4_autofocus(dsd4 *s, const dsd4_scan_params *p, int *best, dsd4_progress_fn cb, void *ud);
 

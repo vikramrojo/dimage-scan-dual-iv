@@ -31,6 +31,7 @@ static void usage(void)
 "  frame <n>                 move the holder to frame n\n"
 "  eject                     eject the film holder\n"
 "  home                      return the carriage to its home position\n"
+"  reset                     reset the scanner and wait until it is ready\n"
 "  focus <pos>               move the focus motor (-200..200)\n"
 "  autofocus [--frame n]     run the original autofocus sequence\n"
 "  preview -o file.tiff      800 dpi preview of the current/selected frame\n"
@@ -125,6 +126,15 @@ static int check(int r, dsd4 *s, const char *what)
 {
     if (r == DSD4_OK) return 0;
     done_progress();
+    int code = dsd4_last_error(s);
+    if (r == DSD4_ERR_SCANNER && (code == 0x67 || code == 0x68 || code == 0x69 || code == 0xd1)) {
+        fprintf(stderr, "dsdual4: %s: the scanner reports a film holder problem (code 0x%02x: %s).\n"
+                "  The holder may be half inserted or still moving. Either push it in until the\n"
+                "  scanner grabs it, or pull it out completely, wait a few seconds and retry.\n"
+                "  'dsdual4 reset' resets the scanner; if that fails, switch it off and on.\n",
+                what, code, dsd4_scanner_error_text(code));
+        return 1;
+    }
     if (r == DSD4_ERR_SCANNER || r == DSD4_ERR_IO)
         fprintf(stderr, "dsdual4: %s: %s (scanner code 0x%02x: %s)\n", what, dsd4_strerror(r),
                 dsd4_last_error(s), dsd4_scanner_error_text(dsd4_last_error(s)));
@@ -419,6 +429,7 @@ static int run_menu(dsd4 *s, int fw_check)
             { 'f', "Autofocus a frame", need_scan },
             { 'o', "Open the last file in Preview", *last ? NULL : "nothing scanned yet" },
             { 'e', "Eject the holder", holder_ok ? NULL : "no holder" },
+            { 'x', "Reset the scanner (if it reports errors)", NULL },
             { 'c', "Settings", NULL },
             { 'r', "Refresh status", NULL },
             { 'h', "Instructions", NULL },
@@ -498,6 +509,13 @@ static int run_menu(dsd4 *s, int fw_check)
             break;
         case 'o':
             open_in_preview(last);
+            break;
+        case 'x':
+            printf("  Resetting the scanner...\n");
+            if (!check(dsd4_reset(s, 60), s, "reset")) {
+                initialized = 0;
+                printf("  Scanner reset. Choose Initialize next.\n");
+            }
             break;
         case 'e':
             if (!check(dsd4_eject(s), s, "eject")) printf("  Holder ejected.\n");
@@ -618,6 +636,16 @@ int main(int argc, char **argv)
              check(dsd4_select_frame(s, atoi(cargv[1])), s, "frame");
     } else if (!strcmp(cmd, "eject")) {
         rc = check(dsd4_eject(s), s, "eject");
+    } else if (!strcmp(cmd, "reset")) {
+        fprintf(stderr, "resetting the scanner...\n");
+        rc = check(dsd4_reset(s, 60), s, "reset");
+        if (!rc) {
+            dsd4_holder_info h;
+            dsd4_get_holder(s, &h);
+            fprintf(stderr, "scanner ready (holder: %s). Run init next.\n",
+                    h.holder == DSD4_HOLDER_NONE ? "none" : h.holder == DSD4_HOLDER_STRIP ? "35 mm strip" :
+                    h.holder == DSD4_HOLDER_SLIDE ? "35 mm slides" : "other");
+        }
     } else if (!strcmp(cmd, "home")) {
         rc = check(dsd4_home(s), s, "home");
     } else if (!strcmp(cmd, "focus") && cargc > 1) {
