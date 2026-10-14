@@ -63,7 +63,9 @@ typedef struct {
     double shift;       /* DSD4_SIM_SHIFT: carriage offset (lines) of every second image scan */
     int outlier;        /* DSD4_SIM_OUTLIER=n: every n-th line read is disturbed */
     int star;           /* DSD4_SIM_CHART=star: fine detail beyond Nyquist through a lens PSF */
-    double psf;         /* DSD4_SIM_PSF: lens blur sigma in pixels at best focus (star chart) */
+    int edge;           /* DSD4_SIM_CHART=edge: a razor blade's corner, slanted 5 degrees */
+    double psf;         /* DSD4_SIM_PSF: lens blur sigma in pixels at best focus (star, edge) */
+    double psf_y;       /* DSD4_SIM_PSF_Y: the same along the carriage (default: psf) */
     double breathing;   /* DSD4_SIM_BREATHING: magnification change, ppm per focus step */
     double jitter;      /* DSD4_SIM_JITTER: random sub-line offset per image scan, sigma in lines */
     int yres_ok;        /* DSD4_SIM_YRES=1: windows above 3200 dpi oversample; 2: accepted, 3200 pitch */
@@ -149,6 +151,37 @@ static double star_pixel(sim_t *m, double x, double y, int c, double blur_steps)
     return v * (c == 0 ? 1.0 : c == 1 ? 0.95 : 0.9);
 }
 
+/* Slanted-edge target: an opaque razor blade whose corner sits at the frame
+ * centre, its edges turned 5 degrees from the axes, on clear film.  The lens
+ * (gaussian psf across, psf_y along the carriage) is applied exactly to each
+ * edge; the pixel aperture (box) by 4x4 supersampling.  For the slanted-edge
+ * MTF: the near-vertical edge measures across, the near-horizontal one along. */
+#define EDGE_DEG 5.0
+static double edge_pixel(const sim_t *m, double x, double y, double scale, double blur_steps)
+{
+    const double th = EDGE_DEG * M_PI / 180, c = cos(th), s = sin(th);
+    const double sx = m->psf + 0.04 * blur_steps, sy = m->psf_y + 0.04 * blur_steps;
+    {   /* far from both edges: no blur to compute */
+        const double px = x - 1560, py = y - 2340, d1 = c * px + s * py, d2 = -s * px + c * py;
+        const double far = 6 * (sx > sy ? sx : sy) + scale + 1;
+        if ((d1 < -far || d2 < -far)) return 0.85;
+        if (d1 > far && d2 > far) return 0.85 * 0.02;
+    }
+    double v = 0;
+    for (int j = 0; j < 4; j++)
+        for (int i = 0; i < 4; i++) {
+            const double px = x + (i - 1.5) / 4 * scale - 1560, py = y + (j - 1.5) / 4 * scale - 2340;
+            /* signed distances to the two edges: blade where both are positive */
+            const double d1 = c * px + s * py, d2 = -s * px + c * py;
+            /* gaussian blur of a straight edge: its sigma along the edge normal */
+            const double s1 = hypot(sx * c, sy * s), s2 = hypot(sx * s, sy * c);
+            const double p1 = s1 > 0 ? 0.5 * erfc(-d1 / (s1 * M_SQRT2)) : d1 > 0;
+            const double p2 = s2 > 0 ? 0.5 * erfc(-d2 / (s2 * M_SQRT2)) : d2 > 0;
+            v += 0.85 * (1 - 0.98 * p1 * p2);
+        }
+    return v / 16;
+}
+
 static double gauss(sim_t *m)
 {
     double u[2];
@@ -177,7 +210,8 @@ static void make_line(sim_t *m, uint8_t *out, uint32_t line)
     for (uint32_t i = 0; i < px; i++) {
         double xx = 1560 + (m->ulx + i * scale - 1560) / mag;
         for (int c = 0; c < 3; c++) {
-            double v = (m->star ? star_pixel(m, xx, yy, c, blur)
+            double v = (m->edge ? edge_pixel(m, xx, yy, scale, blur)
+                        : m->star ? star_pixel(m, xx, yy, c, blur)
                         : m->nega ? nega_chart(xx, yy, c, blur) : chart(xx, yy, c, blur)) *
                        (m->exp[c] ? m->exp[c] / 142.857 : 1.0);
             if (xx < m->border || xx > 3120 - m->border || yy < m->border || yy > 4680 - m->border) v = 0;
@@ -466,9 +500,10 @@ dsd4_transport *dsd4_sim_open(const char *firmware_path, char *err, size_t errle
     if ((ev = getenv("DSD4_SIM_BORDER"))) m->border = atof(ev);
     if ((ev = getenv("DSD4_SIM_SHIFT"))) m->shift = atof(ev);
     if ((ev = getenv("DSD4_SIM_OUTLIER"))) m->outlier = atoi(ev);
-    if ((ev = getenv("DSD4_SIM_CHART"))) m->star = !strcmp(ev, "star");
+    if ((ev = getenv("DSD4_SIM_CHART"))) { m->star = !strcmp(ev, "star"); m->edge = !strcmp(ev, "edge"); }
     if (m->star) init_gratings();
     m->psf = (ev = getenv("DSD4_SIM_PSF")) ? atof(ev) : 0.35;
+    m->psf_y = (ev = getenv("DSD4_SIM_PSF_Y")) ? atof(ev) : m->psf;
     if ((ev = getenv("DSD4_SIM_BREATHING"))) m->breathing = atof(ev);
     if ((ev = getenv("DSD4_SIM_JITTER"))) m->jitter = atof(ev);
     if ((ev = getenv("DSD4_SIM_YRES"))) m->yres_ok = atoi(ev);

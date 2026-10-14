@@ -600,6 +600,7 @@ static int line_scan(dsd4 *s, line_setting *ls, uint8_t *out, float *fout, size_
                     }
                     s->dbg_var[(size_t)done * spl + i] = (float)(v / (samples - 1) / (65535.0 * 65535.0));
                 }
+                if (s->dbg_dev) s->dbg_dev[(size_t)done * spl + i] = (float)((ms[i] - m) / 65535.0);
                 if (fdst) fdst[i] = (float)m * fg[i % ch];
                 else ((uint16_t *)dst)[i] = (uint16_t)(m + 0.5);
             }

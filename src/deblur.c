@@ -17,6 +17,7 @@
  * and negative data are converted for it.
  */
 #include "dsd4_internal.h"
+#include "imgops.h"
 
 #include <Accelerate/Accelerate.h>
 #include <dispatch/dispatch.h>
@@ -35,111 +36,6 @@
 #define ITER 20
 #define TV 0.002
 
-/* ------------------------------------------------------------ helpers */
-
-static void gauss_1d(float *k, int r, double s)
-{
-    double sum = 0;
-    for (int i = -r; i <= r; i++) sum += k[i + r] = (float)exp(-0.5 * i * i / (s * s));
-    for (int i = 0; i <= 2 * r; i++) k[i] = (float)(k[i] / sum);
-}
-
-static inline int mirror(int i, int n)
-{
-    while (i < 0 || i >= n) i = i < 0 ? -i - 1 : 2 * n - i - 1;
-    return i;
-}
-
-/* separable gaussian blur, mirrored edges; out may not alias in */
-static int gauss_blur(const float *in, float *out, int w, int h, double s)
-{
-    const int r = (int)ceil(3 * s);
-    float *k = malloc((size_t)(2 * r + 1) * sizeof *k), *t = malloc((size_t)w * h * sizeof *t);
-    if (!k || !t) { free(k); free(t); return -1; }
-    gauss_1d(k, r, s);
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            float a = 0;
-            for (int i = -r; i <= r; i++) a += k[i + r] * in[(size_t)y * w + mirror(x + i, w)];
-            t[(size_t)y * w + x] = a;
-        }
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            float a = 0;
-            for (int i = -r; i <= r; i++) a += k[i + r] * t[(size_t)mirror(y + i, h) * w + x];
-            out[(size_t)y * w + x] = a;
-        }
-    free(k);
-    free(t);
-    return 0;
-}
-
-static int cmp_f(const void *a, const void *b)
-{
-    float x = *(const float *)a, y = *(const float *)b;
-    return x < y ? -1 : x > y;
-}
-
-/* 5x5 median: removes dust specks and hairs, which are sharp (on the film,
- * not in the photograph): they would make the picture look sharper than it
- * is, and ring if deconvolved.  Rows in parallel. */
-typedef struct { const float *in; float *out; int w, h; } med_t;
-
-static void median5_row(void *ctx, size_t row)
-{
-    const med_t *m = ctx;
-    const float *in = m->in;
-    const int w = m->w, h = m->h, y = (int)row;
-    float *out = m->out;
-    {
-        for (int x = 0; x < w; x++) {
-            float v[25];
-            int n = 0;
-            for (int j = -2; j <= 2; j++)
-                for (int i = -2; i <= 2; i++) {
-                    float a = in[(size_t)mirror(y + j, h) * w + mirror(x + i, w)];
-                    int k = n++;
-                    while (k > 0 && v[k - 1] > a) { v[k] = v[k - 1]; k--; }
-                    v[k] = a;
-                }
-            out[(size_t)y * w + x] = v[12];
-        }
-    }
-}
-
-static void median5(const float *in, float *out, int w, int h)
-{
-    med_t m = { in, out, w, h };
-    dispatch_apply_f((size_t)h, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), &m, median5_row);
-}
-
-/* running min or max over a (2r+1)^2 window, separable; mirrored edges */
-static int minmax_filter(const float *in, float *out, int w, int h, int r, int want_max)
-{
-    float *t = malloc((size_t)w * h * sizeof *t);
-    if (!t) return -1;
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            float m = in[(size_t)y * w + x];
-            for (int i = -r; i <= r; i++) {
-                float v = in[(size_t)y * w + mirror(x + i, w)];
-                m = want_max ? (v > m ? v : m) : (v < m ? v : m);
-            }
-            t[(size_t)y * w + x] = m;
-        }
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            float m = t[(size_t)y * w + x];
-            for (int i = -r; i <= r; i++) {
-                float v = t[(size_t)mirror(y + i, h) * w + x];
-                m = want_max ? (v > m ? v : m) : (v < m ? v : m);
-            }
-            out[(size_t)y * w + x] = m;
-        }
-    free(t);
-    return 0;
-}
-
 /* ------------------------------------------------------- blur estimate */
 
 /* blur sigma (full-resolution pixels) per TILE cell; NAN where there are
@@ -157,9 +53,9 @@ static int estimate(const float *P, int W, int H, float *map, int gw, int gh)
             const float *p = P + (size_t)2 * y * W + 2 * x;
             q[(size_t)y * w + x] = logf(0.25f * (p[0] + p[1] + p[W] + p[W + 1]) + 0.002f);
         }
-    median5(q, m, w, h);
+    io_median5(q, m, w, h);
     const double g = 1.0, s0 = 2.0;
-    int err = gauss_blur(m, b, w, h, g) || gauss_blur(b, r, w, h, s0);
+    int err = io_gauss_blur(m, b, w, h, g) || io_gauss_blur(b, r, w, h, s0);
     free(q);
     free(m);
     if (err) { free(b); free(r); return -1; }
@@ -190,7 +86,7 @@ static int estimate(const float *P, int W, int H, float *map, int gw, int gh)
             for (int y = y0; y < y1; y++)
                 for (int x = x0; x < x1; x++) v[k++] = gb[(size_t)y * w + x];
             if (k < T * T / 4) continue;
-            qsort(v, (size_t)k, sizeof *v, cmp_f);
+            qsort(v, (size_t)k, sizeof *v, io_cmp_f);
             const float thr = v[(int)(0.97 * (k - 1))];
             if (thr < 0.03f) continue; /* no real edges here */
             int nr = 0;
@@ -203,7 +99,7 @@ static int estimate(const float *P, int W, int H, float *map, int gw, int gh)
                     }
                 }
             if (nr < 50) continue;
-            qsort(v, (size_t)nr, sizeof *v, cmp_f);
+            qsort(v, (size_t)nr, sizeof *v, io_cmp_f);
             double R = v[nr / 2], s = s0 / sqrt(R * R - 1);
             s = s * s - g * g;
             map[ty * gw + tx] = (float)(2 * sqrt(s > 0 ? s : 0)); /* to full resolution */
@@ -252,9 +148,7 @@ static void tile_job(void *ctx, size_t idx)
     if (!buf) { j->failed = 1; return; }
     float *img = buf, *est = buf + n, *t = buf + 2 * n, *re = buf + 3 * n, *im = buf + 4 * n, *Hs = buf + 5 * n;
     const int x0 = tx * TILE - PAD, y0 = ty * TILE - PAD;
-    for (int y = 0; y < NFFT; y++)
-        for (int x = 0; x < NFFT; x++)
-            img[y * NFFT + x] = j->base[(size_t)mirror(y0 + y, j->H) * j->W + mirror(x0 + x, j->W)];
+    io_tile_load(j->base, j->W, j->H, x0, y0, NFFT, img);
 
     /* psf: a disk of radius rd with soft edges (gaussian rd * 0.3); sigma
      * of the whole: s.  Spectrum = disk spectrum x gaussian transfer. */
@@ -312,48 +206,11 @@ static void tile_job(void *ctx, size_t idx)
         for (int i = 0; i < n; i++) est[i] = re[i] < lo ? lo : re[i] > hi ? hi : re[i];
     }
 
-    /* blend into the image: weight 1 in the middle of the tile, ramps over
-     * PAD/2 on each side so that neighbouring tiles cross-fade */
-    const int ramp = PAD / 2;
-    dispatch_semaphore_wait(j->lock, DISPATCH_TIME_FOREVER);
-    for (int y = PAD - ramp; y < NFFT - PAD + ramp; y++) {
-        const int iy = y0 + y;
-        if (iy < 0 || iy >= j->H) continue;
-        float wy = y < PAD + ramp ? (float)(y - (PAD - ramp) + 0.5f) / (2 * ramp)
-                 : y >= NFFT - PAD - ramp ? (float)(NFFT - PAD + ramp - y - 0.5f) / (2 * ramp) : 1;
-        for (int x = PAD - ramp; x < NFFT - PAD + ramp; x++) {
-            const int ix = x0 + x;
-            if (ix < 0 || ix >= j->W) continue;
-            float wx = x < PAD + ramp ? (float)(x - (PAD - ramp) + 0.5f) / (2 * ramp)
-                     : x >= NFFT - PAD - ramp ? (float)(NFFT - PAD + ramp - x - 0.5f) / (2 * ramp) : 1;
-            const size_t o = (size_t)iy * j->W + ix;
-            j->acc[o] += wx * wy * est[y * NFFT + x];
-            j->wsum[o] += wx * wy;
-        }
-    }
-    dispatch_semaphore_signal(j->lock);
+    io_tile_blend(j->acc, j->wsum, j->W, j->H, x0, y0, NFFT, PAD, est, j->lock);
     free(buf);
 }
 
 /* ------------------------------------------------------------- driver */
-
-static inline float sample(const dsd4_image *im, int x, int y, int c)
-{
-    const uint8_t *row = im->data + (size_t)y * im->stride;
-    const size_t i = (size_t)x * im->channels + c;
-    return im->bits == 8 ? row[i] / 255.0f : im->bits == 16 ? ((const uint16_t *)row)[i] / 65535.0f
-                                                           : ((const float *)row)[i];
-}
-
-static inline void put(dsd4_image *im, int x, int y, int c, float v)
-{
-    uint8_t *row = im->data + (size_t)y * im->stride;
-    const size_t i = (size_t)x * im->channels + c;
-    if (im->bits == 32) { ((float *)row)[i] = v > 0 ? v : 0; return; }
-    v = v < 0 ? 0 : v > 1 ? 1 : v;
-    if (im->bits == 16) ((uint16_t *)row)[i] = (uint16_t)(v * 65535.0f + 0.5f);
-    else row[i] = (uint8_t)(v * 255.0f + 0.5f);
-}
 
 int dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info)
 {
@@ -380,7 +237,7 @@ int dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info)
         for (int x = 0; x < W; x++) {
             float Y = 0;
             for (int c = 0; c < ch; c++) {
-                float v = sample(img, x, y, c);
+                float v = io_sample(img, x, y, c);
                 if (tone == DSD4_TONE_GAMMA22) v = powf(v > 0 ? v : 0, 2.2f);
                 Y += (ch == 3 ? wl[c] : 1) * v;
             }
@@ -393,7 +250,7 @@ int dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info)
         float *v = malloc((N / m + 1) * sizeof *v);
         if (!v) goto out;
         for (size_t i = 0; i < N; i += m) v[k++] = P[i];
-        qsort(v, k, sizeof *v, cmp_f);
+        qsort(v, k, sizeof *v, io_cmp_f);
         float med = v[k / 2];
         free(v);
         if (med > 0)
@@ -414,7 +271,7 @@ int dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info)
     }
     float med = 0, mn = 0, mxs = 0;
     if (nv) {
-        qsort(v, (size_t)nv, sizeof *v, cmp_f);
+        qsort(v, (size_t)nv, sizeof *v, io_cmp_f);
         med = v[nv / 2];
     }
     free(v);
@@ -448,8 +305,8 @@ int dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info)
      * than the blur, so what the median and the gaussian take out is film
      * (grain, dust, hairs); it is added back unchanged */
     r = DSD4_ERR_NOMEM;
-    median5(P, acc, W, H);
-    if (gauss_blur(acc, base, W, H, GRAIN)) goto out;
+    io_median5(P, acc, W, H);
+    if (io_gauss_blur(acc, base, W, H, GRAIN)) goto out;
     memset(acc, 0, N * sizeof *acc);
     job_t j = { base, acc, wsum, sm, W, H, gw, gh, vDSP_create_fftsetup(LOG2N, FFT_RADIX2),
                 dispatch_semaphore_create(1), 0 };
@@ -464,7 +321,7 @@ int dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info)
      * (dust specks larger than the median would otherwise get dark rings) */
     const int rr = (int)ceil(1.5 * med);
     float *lo = malloc(N * sizeof *lo), *hi = malloc(N * sizeof *hi);
-    if (!lo || !hi || minmax_filter(base, lo, W, H, rr, 0) || minmax_filter(base, hi, W, H, rr, 1)) {
+    if (!lo || !hi || io_minmax_filter(base, lo, W, H, rr, 0) || io_minmax_filter(base, hi, W, H, rr, 1)) {
         free(lo);
         free(hi);
         goto out;
@@ -484,12 +341,12 @@ int dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info)
             /* relative: the same in shadows and highlights */
             gm[i] = hypotf(dx, dy) / (base[i] + 0.01f);
         }
-    if (gauss_blur(gm, gs, W, H, 2.0)) { free(gm); free(gs); free(lo); free(hi); goto out; }
+    if (io_gauss_blur(gm, gs, W, H, 2.0)) { free(gm); free(gs); free(lo); free(hi); goto out; }
     float knee;
     {
         size_t m = N / 65536 + 1, k = 0;
         for (size_t i = 0; i < N; i += m) gm[k++] = gs[i];
-        qsort(gm, k, sizeof *gm, cmp_f);
+        qsort(gm, k, sizeof *gm, io_cmp_f);
         knee = 2 * gm[k / 2];
     }
     free(gm);
@@ -508,7 +365,7 @@ int dsd4_deblur(dsd4_image *img, int level, int tone, dsd4_deblur_info *info)
             k = k < 0.2f ? 0.2f : k > 5 ? 5 : k;
             /* back to the image's encoding */
             float f = tone == DSD4_TONE_GAMMA22 ? powf(k, 1 / 2.2f) : tone == DSD4_TONE_NEGATIVE ? powf(k, -0.6f) : k;
-            for (int c = 0; c < ch; c++) put(img, x, y, c, sample(img, x, y, c) * f);
+            for (int c = 0; c < ch; c++) io_put(img, x, y, c, io_sample(img, x, y, c) * f);
         }
     free(lo);
     free(hi);

@@ -246,6 +246,11 @@ struct dsd4 {
     /* research hooks (src/research.c) */
     uint16_t probe_yres;      /* != 0: send this vertical resolution unchanged */
     float *dbg_var;           /* != NULL: per-sample variance of multi-sample copies */
+    float *dbg_dev;           /* != NULL: first copy minus the mean (sensor noise, signed) */
+
+    /* experimental processing inside dsd4_scan_minolta, before the film curves */
+    const dsd4_enhance_params *enhance;
+    dsd4_enhance_info enhance_info;
 
     /* Minolta preview: AE result of the last previewed frame */
     struct {
@@ -306,5 +311,11 @@ uint16_t *cal_average(const uint8_t fmt[32], uint32_t count, const uint8_t *raw)
 void cal_dark_shading(dsd4 *s, const uint8_t fmt[32], uint32_t count, uint16_t *dark);
 void cal_white_shading(dsd4 *s, const uint8_t fmt[32], uint32_t count, uint16_t *white);
 int  cal_dark_smooth(uint16_t *dark, uint32_t count);
+
+/* mtf.c: recompute MTF50 / Nyquist / sigma of direction t */
+void dsd4i_mtf_stats(dsd4_mtf_profile *pr, int t);
+
+/* profiles.c: a typical Dual IV (profile file text) */
+extern const char dsd4i_default_mtf_1x[], dsd4i_default_mtf_multi[], dsd4i_default_noise[];
 
 #endif

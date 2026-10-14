@@ -147,6 +147,55 @@ int main(int argc, char **argv)
     if (bad) { printf("FAIL deblur-dng-only-samples\n"); fail++; }
     else printf("ok   deblur-dng-only-samples\n");
 
+    /* a full frame's width: the last tile column is narrow (3120 = 8 x 384
+     * + 48); the frame's right edge must be no worse than its middle */
+    {
+        enum { FW = 3120, FH = 768 };
+        float *fp = malloc((size_t)FW * FH * sizeof *fp);
+        for (int y = 0; y < FH; y++)
+            for (int x = 0; x < FW; x++) fp[y * FW + x] = (float)(tone[((y / B) * (W / B) + x / B % (W / B)) % ((W / B) * (H / B))] * 0.9);
+        float *bl = malloc((size_t)FW * FH * sizeof *bl), *t = malloc((size_t)FW * FH * sizeof *t);
+        enum { rr = 9 };
+        double k[2 * rr + 1], ks = 0;
+        for (int i = -rr; i <= rr; i++) ks += k[i + rr] = exp(-0.5 * i * i / 9.0);
+        for (int i = 0; i <= 2 * rr; i++) k[i] /= ks;
+        for (int y = 0; y < FH; y++)
+            for (int x = 0; x < FW; x++) {
+                double a = 0;
+                for (int i = -rr; i <= rr; i++) { int xx = x + i < 0 ? 0 : x + i >= FW ? FW - 1 : x + i; a += k[i + rr] * fp[y * FW + xx]; }
+                t[y * FW + x] = (float)a;
+            }
+        for (int y = 0; y < FH; y++)
+            for (int x = 0; x < FW; x++) {
+                double a = 0;
+                for (int i = -rr; i <= rr; i++) { int yy = y + i < 0 ? 0 : y + i >= FH ? FH - 1 : y + i; a += k[i + rr] * t[yy * FW + x]; }
+                bl[y * FW + x] = (float)a;
+            }
+        dsd4_image fr = { 0 };
+        fr.width = FW; fr.height = FH; fr.channels = 3; fr.bits = 16; fr.dpi = 3200; fr.stride = (size_t)FW * 6;
+        fr.data = malloc(fr.stride * FH);
+        for (int i = 0; i < FW * FH; i++)
+            for (int c = 0; c < 3; c++) {
+                double v = bl[i] * (1 + 0.02 * nrand()) * 65535;
+                ((uint16_t *)fr.data)[i * 3 + c] = (uint16_t)(v < 0 ? 0 : v > 65535 ? 65535 : v + 0.5);
+            }
+        dsd4_deblur(&fr, DSD4_DEBLUR_HIGH, DSD4_TONE_LINEAR, &di);
+        double em = 0, ee = 0;
+        long nm = 0, ne = 0;
+        for (int y = 64; y < FH - 64; y++)
+            for (int x = 0; x < FW; x++) {
+                double d = ((uint16_t *)fr.data)[((size_t)y * FW + x) * 3 + 1] / 65535.0 - fp[y * FW + x];
+                if (x >= FW - 48) { ee += d * d; ne++; }
+                else if (x >= FW / 2 - 200 && x < FW / 2 + 200) { em += d * d; nm++; }
+            }
+        em = sqrt(em / nm); ee = sqrt(ee / ne);
+        printf("     full-width frame: error to sharp, middle %.4f, right 48 px %.4f\n", em, ee);
+        if (!di.applied || !(ee < 1.5 * em)) { printf("FAIL deblur-frame-edge\n"); fail++; }
+        else printf("ok   deblur-frame-edge\n");
+        dsd4_image_free(&fr);
+        free(fp); free(bl); free(t);
+    }
+
     make(&im, pic, 0.6);
     uint16_t *copy = malloc(im.stride * H);
     memcpy(copy, im.data, im.stride * H);

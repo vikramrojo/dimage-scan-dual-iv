@@ -441,10 +441,22 @@ static float from_half(uint16_t h)
 /* first value of a SHORT or LONG entry */
 static uint32_t ifd_val(const uint8_t *e) { return get16le(e + 2) == T_SHORT ? get16le(e + 8) : get32le(e + 8); }
 
-int dsd4_deblur_dng(const char *in, const char *out, int level, int tone, dsd4_deblur_info *info)
+/* One of this writer's DNGs in memory: little-endian, one IFD, uncompressed
+ * contiguous strips.  The samples are decoded into im (16-bit, or float for
+ * half/32-bit float files). */
+typedef struct {
+    uint8_t *d;               /* the whole file */
+    long len;
+    uint8_t *samples;         /* where the pixel data starts in d */
+    uint32_t bps;             /* bits per sample in the file */
+    int profiled;             /* ProfileName says: this driver's finished positive */
+} dng_file;
+
+static int load_dng(const char *path, dng_file *df, dsd4_image *im)
 {
-    if (info) memset(info, 0, sizeof *info);
-    FILE *f = fopen(in, "rb");
+    memset(df, 0, sizeof *df);
+    memset(im, 0, sizeof *im);
+    FILE *f = fopen(path, "rb");
     if (!f) return DSD4_ERR_IO;
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
@@ -452,16 +464,13 @@ int dsd4_deblur_dng(const char *in, const char *out, int level, int tone, dsd4_d
     uint8_t *d = len > 16 ? malloc((size_t)len) : NULL;
     if (!d || fread(d, 1, (size_t)len, f) != (size_t)len) { fclose(f); free(d); return d ? DSD4_ERR_IO : DSD4_ERR_PARAM; }
     fclose(f);
-    int r = DSD4_ERR_PARAM;
-    dsd4_image im = { 0 };
-    /* this writer's layout: little-endian, one IFD, uncompressed strips */
-    uint32_t w = 0, h = 0, spp = 0, bps = 0, fmt = 1, comp = 1, phot = 0, nstrip = 0, so = 0, dng = 0;
+    uint32_t w = 0, h = 0, spp = 0, bps = 0, fmt = 1, comp = 1, phot = 0, nstrip = 0, so = 0, dng = 0, xres = 0;
     int profiled = 0;
-    if (memcmp(d, "II*\0", 4)) goto out;
+    if (memcmp(d, "II*\0", 4)) goto bad;
     uint32_t ifd = get32le(d + 4);
-    if (ifd + 2 > (uint32_t)len) goto out;
+    if (ifd + 2 > (uint32_t)len) goto bad;
     unsigned n = get16le(d + ifd);
-    if (ifd + 2 + 12ull * n > (uint64_t)len) goto out;
+    if (ifd + 2 + 12ull * n > (uint64_t)len) goto bad;
     for (unsigned i = 0; i < n; i++) {
         const uint8_t *e = d + ifd + 2 + 12 * i;
         uint16_t tag = get16le(e);
@@ -475,6 +484,7 @@ int dsd4_deblur_dng(const char *in, const char *out, int level, int tone, dsd4_d
         case 273: nstrip = cnt; so = cnt == 1 ? (uint32_t)(e - d) + 8 : get32le(e + 8);
                   if (get16le(e + 2) != T_LONG) nstrip = 0; break;
         case 277: spp = ifd_val(e); break;
+        case 282: { uint32_t o = get32le(e + 8); if (o + 8 <= (uint32_t)len && get32le(d + o + 4)) xres = get32le(d + o) / get32le(d + o + 4); break; }
         case 339: fmt = cnt <= 2 ? get16le(e + 8) : get16le(d + get32le(e + 8)); break;
         case 50706: dng = 1; break;
         case 50936: { /* ProfileName: this driver's finished positives */
@@ -487,47 +497,72 @@ int dsd4_deblur_dng(const char *in, const char *out, int level, int tone, dsd4_d
     }
     if (!dng || comp != 1 || phot != 34892 || !w || !h || (spp != 1 && spp != 3) || !nstrip ||
         so + 4ull * nstrip > (uint64_t)len || !((fmt == 1 && bps == 16) || (fmt == 3 && (bps == 16 || bps == 32))))
-        goto out;
+        goto bad;
+    const uint32_t data = get32le(d + so);
+    if (data + (uint64_t)w * h * spp * (bps / 8) > (uint64_t)len) goto bad;
+    im->width = (int)w;
+    im->height = (int)h;
+    im->channels = (int)spp;
+    im->bits = fmt == 1 ? 16 : 32;
+    im->dpi = (int)xres;
+    im->stride = (size_t)w * spp * (im->bits / 8);
+    for (int c = 0; c < 3; c++) im->digital_gain[c] = 1.0;
+    im->data = malloc(im->stride * h);
+    if (!im->data) { free(d); return DSD4_ERR_NOMEM; }
+    const size_t ns = (size_t)w * h * spp;
+    const uint8_t *p = d + data;
+    for (size_t i = 0; i < ns; i++) {
+        if (im->bits == 16) ((uint16_t *)im->data)[i] = get16le(p + 2 * i);
+        else if (bps == 16) ((float *)im->data)[i] = from_half(get16le(p + 2 * i));
+        else { uint32_t u = get32le(p + 4 * i); memcpy((float *)im->data + i, &u, 4); }
+    }
+    *df = (dng_file){ d, len, d + data, bps, profiled };
+    return DSD4_OK;
+bad:
+    free(d);
+    return DSD4_ERR_PARAM;
+}
+
+int dsd4_read_dng(const char *path, dsd4_image *img)
+{
+    dng_file df;
+    int r = load_dng(path, &df, img);
+    if (!r) free(df.d);
+    return r;
+}
+
+int dsd4_deblur_dng(const char *in, const char *out, int level, int tone, dsd4_deblur_info *info)
+{
+    if (info) memset(info, 0, sizeof *info);
+    dng_file df;
+    dsd4_image im;
+    int r = load_dng(in, &df, &im);
+    if (r) return r;
+    r = DSD4_ERR_PARAM;
     if (tone < 0) {
-        if (!profiled) goto out; /* raw scan: the caller has to say positive or negative */
+        if (!df.profiled) goto out; /* raw scan: the caller has to say positive or negative */
         tone = DSD4_TONE_LINEAR;
     }
-    /* strips are contiguous in this writer: one run of samples */
-    const uint32_t data = get32le(d + so), bytes = bps / 8;
-    const uint64_t total = (uint64_t)w * h * spp * bytes;
-    if (data + total > (uint64_t)len) goto out;
-    im.width = (int)w;
-    im.height = (int)h;
-    im.channels = (int)spp;
-    im.bits = fmt == 1 ? 16 : 32;
-    im.stride = (size_t)w * spp * (im.bits / 8);
-    im.data = malloc(im.stride * h);
-    r = DSD4_ERR_NOMEM;
-    if (!im.data) goto out;
-    const size_t ns = (size_t)w * h * spp;
-    uint8_t *p = d + data;
-    for (size_t i = 0; i < ns; i++) {
-        if (im.bits == 16) ((uint16_t *)im.data)[i] = get16le(p + 2 * i);
-        else if (bps == 16) ((float *)im.data)[i] = from_half(get16le(p + 2 * i));
-        else { uint32_t u = get32le(p + 4 * i); memcpy((float *)im.data + i, &u, 4); }
-    }
     if ((r = dsd4_deblur(&im, level, tone, info))) goto out;
+    const size_t ns = (size_t)im.width * im.height * im.channels;
+    uint8_t *p = df.samples;
     for (size_t i = 0; i < ns; i++) {
         if (im.bits == 16) put16(p + 2 * i, ((uint16_t *)im.data)[i]);
-        else if (bps == 16) put16(p + 2 * i, to_half(((float *)im.data)[i]));
+        else if (df.bps == 16) put16(p + 2 * i, to_half(((float *)im.data)[i]));
         else { uint32_t u; memcpy(&u, (float *)im.data + i, 4); put32(p + 4 * i, u); }
     }
     /* write beside the target, then replace it: never a half-written file */
     char tmp[4096];
     snprintf(tmp, sizeof tmp, "%s.deblur-tmp", out);
     r = DSD4_ERR_IO;
-    if (!(f = fopen(tmp, "wb"))) goto out;
-    int ok = fwrite(d, 1, (size_t)len, f) == (size_t)len;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) goto out;
+    int ok = fwrite(df.d, 1, (size_t)df.len, f) == (size_t)df.len;
     ok = !fclose(f) && ok;
     if (!ok || rename(tmp, out)) { remove(tmp); goto out; }
     r = DSD4_OK;
 out:
     free(im.data);
-    free(d);
+    free(df.d);
     return r;
 }

@@ -67,6 +67,7 @@ dsdual4 scan --film nega --minolta --format dng -o m.dng  # Minolta positive as 
 dsdual4 scan --film nega --invert --format dng -o p.dng   # simple-invert positive DNG
 dsdual4 scan-all -o roll                     # roll-1.tiff ... roll-6.tiff
 dsdual4 scan-all --frames 4 -o roll          # a strip of 4: roll-1 ... roll-4
+dsdual4 scan --experimental 4000dpi,denoise-low -o s.tiff  # experimental, see below
 dsdual4 convert raw.tiff --film bw-nega -o out.tiff   # process an existing raw negative
 dsdual4 eject | home | reset | autofocus | info
 ```
@@ -139,6 +140,40 @@ original sequence.
 
 Not included: the original software's Digital ICE, Pixel Polish and Grain
 Dissolver, and index scans.
+
+## Experimental: 4000 dpi sharpness
+
+After Norman Koren's film-scanner MTF studies: a scanner's own optics and
+sensor cost a 3200 dpi scan a good part of its sharpness, and compensating
+it gains more than anything else, provided the grain is not boosted with it.
+
+1. **Calibrate (optional).** Without it, the experimental options use a
+   typical Dual IV, measured on one unit, and sharpen at 70 % strength so as
+   not to over-correct another unit's optics. Calibrating gives the full,
+   exact correction for your own scanner:
+   * `dsdual4 research mtf`: tape a razor blade into a slide mount, its edge
+     turned 2–20° from the mount's sides, and insert it as a slide. It finds
+     the blade and its best focus and measures the MTF along the carriage
+     (ISO 12233 slanted edge), single and multi-sampled.
+   * `dsdual4 research grain`: a film frame with flat areas (sky, blank
+     film). Grain is the same in every direction, so its spectrum across
+     against along gives the MTF across, which a blade in a mount can't show.
+   * `dsdual4 research noise`: blank film or an empty mount. The sensor's
+     noise is measured from repeated reads of each pixel.
+   * `dsdual4 mtf scan.dng` measures any scan of the blade, for comparing.
+2. **Scan with `--experimental`** (or Device & output settings → e):
+   * `sharpen` undoes the measured blur, on brightness only. It is boosted
+     only where the picture is stronger than the sensor's noise, mostly at
+     edges, and never past Nyquist or into halos.
+   * `denoise-low` removes sensor and colour noise and keeps the grain;
+     `denoise-high` also reduces the grain. The grain is profiled from the
+     flattest parts of each scan, like Neat Image's auto-profile.
+   * `4000dpi` sharpens a 3200 dpi scan and resamples it to 4000 dpi.
+
+It works on the raw scan, before inversion or film curves, so it applies to
+TIFF and DNG output alike; DNGs stay raw. In the simulator, a blade's MTF50
+goes from 35.6 to 53.9 lp/mm on film. Your scanner's numbers will differ, so
+measure them.
 
 ## How it was made and verified
 
