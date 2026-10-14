@@ -183,6 +183,103 @@ int  dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *p, double ev, dsd4_image *im
 int  dsd4_scan_minolta_hdr(dsd4 *s, const dsd4_scan_params *p, double ev, dsd4_image *img,
                            dsd4_minolta_info *info, dsd4_hdr_info *hdr, dsd4_progress_fn cb, void *ud);
 
+/* The scanner's own MTF, from a slanted edge (a razor blade in a slide mount,
+ * turned 2-20 degrees): [0] across (x, the CCD), [1] along (y, the carriage);
+ * per channel, 0..1 cycles/pixel in DSD4_MTF_BINS steps. */
+#define DSD4_MTF_BINS 65
+typedef struct {
+    int valid;
+    int dpi;                  /* scan resolution measured at */
+    double mtf[2][3][DSD4_MTF_BINS];
+    double mtf50[2];          /* cycles/pixel where the MTF is 0.5 (green) */
+    double nyquist[2];        /* MTF at 0.5 cycles/pixel */
+    double sigma[2];          /* gaussian with the same MTF, pixels */
+    int measured[2];          /* 0: copied from the other direction */
+    int samples;              /* multi-sampling it was measured with: single
+                                 reads are softer along the carriage (it moves
+                                 during the exposure; multi-sampling stops) */
+    int focus;                /* focus position it was measured at */
+} dsd4_mtf_profile;
+/* measure on a linear scan of the edge; report (or NULL) gets a summary */
+int  dsd4_measure_edge_mtf(const dsd4_image *img, dsd4_mtf_profile *pr, FILE *report);
+int  dsd4_mtf_write(const dsd4_mtf_profile *pr, const char *path);
+int  dsd4_mtf_read(const char *path, dsd4_mtf_profile *pr);
+/* built in: a typical Dual IV (multi: multi-sampled), for scanners not
+ * calibrated themselves; sharpen with it at reduced strength */
+int  dsd4_mtf_default(int multi, dsd4_mtf_profile *pr);
+/* a direction pr only copied takes old's measurement of it (two scans: the
+ * blade near-horizontal, then near-vertical) */
+void dsd4_mtf_merge(dsd4_mtf_profile *pr, const dsd4_mtf_profile *old);
+/* centre (x, y) and length of the longest slanted edge across (t = 0: a
+ * near-vertical edge) or along (t = 1); -1: none */
+int  dsd4_find_edge(const dsd4_image *img, int t, double *x, double *y, int *len);
+
+/* The scanner's sensor noise, from the spread between multi-sample reads:
+ * per channel, the variance of one read at several signal levels (raw,
+ * 0..1), and its spectrum (1 = white) across (x) and along (y). */
+#define DSD4_NOISE_LEVELS 6
+#define DSD4_NPS_BINS 17          /* 0 .. 0.5 cycles/pixel */
+typedef struct {
+    int valid, levels;
+    double mean[3][DSD4_NOISE_LEVELS];
+    double var[3][DSD4_NOISE_LEVELS];
+    double shape_x[DSD4_NPS_BINS], shape_y[DSD4_NPS_BINS];
+} dsd4_noise_profile;
+/* one read's noise variance at a raw signal level (interpolated) */
+double dsd4_noise_var(const dsd4_noise_profile *np, int c, double signal);
+int  dsd4_noise_write(const dsd4_noise_profile *np, const char *path);
+int  dsd4_noise_read(const char *path, dsd4_noise_profile *np);
+int  dsd4_noise_default(dsd4_noise_profile *np);  /* a typical Dual IV */
+
+/* Calibration scans (research): the MTF of a razor blade in a slide mount
+ * (whole frame, 3200 dpi), and the sensor noise (an empty mount or clear film
+ * at six exposures).  report gets a summary; outdir (or NULL) the scans. */
+/* research mtf finds the blade (800 dpi), sweeps focus on it (autofocus
+ * does not lock on a blade) and measures pr[0] with single reads, pr[1]
+ * multi-sampled */
+int  dsd4_research_mtf(dsd4 *s, const dsd4_scan_params *p, const char *outdir, dsd4_mtf_profile pr[2], FILE *report,
+                       dsd4_progress_fn cb, void *ud);
+/* research grain: the MTF across (x), which a blade in a slide mount cannot
+ * show, from film grain: grain is the same in every direction, so its
+ * spectrum across / along is the scanner's MTF ratio squared.  pr[0] single
+ * reads, pr[1] multi-sampled: their along MTF (from research mtf) in, across
+ * out.  np: the sensor noise to subtract (or NULL). */
+int  dsd4_research_grain(dsd4 *s, const dsd4_scan_params *p, const char *outdir, const dsd4_noise_profile *np,
+                         dsd4_mtf_profile pr[2], FILE *report, dsd4_progress_fn cb, void *ud);
+int  dsd4_research_noise(dsd4 *s, const dsd4_scan_params *p, const char *outdir, dsd4_noise_profile *np,
+                         FILE *report, dsd4_progress_fn cb, void *ud);
+
+/* Experimental: a raw linear scan with the scanner's own MTF compensated
+ * (sharpen, with a 3200 dpi MTF profile), noise reduced with the sensor
+ * profile and the film's grain profiled from the scan's flat areas
+ * (denoise), and resampled to target_dpi (e.g. 4000).  Brightness is
+ * sharpened, colour only denoised.  Apply right after the scan, before any
+ * inversion or film curves. */
+#define DSD4_DENOISE_OFF  0
+#define DSD4_DENOISE_LOW  1   /* sensor noise and colour noise; grain kept */
+#define DSD4_DENOISE_HIGH 2   /* also part of the grain */
+typedef struct {
+    int sharpen;                      /* compensate the scanner's MTF */
+    int denoise;                      /* DSD4_DENOISE_* */
+    int target_dpi;                   /* 0: keep the scan's resolution */
+    const dsd4_mtf_profile *mtf;      /* from research mtf (NULL: no sharpening) */
+    const dsd4_noise_profile *noise;  /* from research noise (NULL: grain only) */
+    int samples;                      /* the scan's multi-sampling (sensor noise / samples) */
+    int hdr;                          /* a merged HDR scan: the sensor profile does not apply */
+    double strength;                  /* share of the MTF correction (0: all of it) */
+} dsd4_enhance_params;
+typedef struct {
+    int sharpened, resampled;
+    double gain_max;                  /* largest MTF boost used */
+    double sensor_sigma, grain_sigma; /* noise (brightness, raw scale) at signal 0.18 */
+    double flat_share;                /* share of the frame used for the grain profile */
+} dsd4_enhance_info;
+int  dsd4_enhance(dsd4_image *img, const dsd4_enhance_params *ep, dsd4_enhance_info *info);
+/* Minolta processing: apply ep (or NULL: none) to its final scan, before
+ * the film curves; dsd4_enhance_result() reports on the last one */
+void dsd4_set_enhance(dsd4 *s, const dsd4_enhance_params *ep);
+void dsd4_enhance_result(const dsd4 *s, dsd4_enhance_info *info);
+
 /* Deblur: reduces camera blur (missed focus) in the photograph, measured per
  * region; frames that are sharp are left alone.  Brightness only, film
  * grain and dust kept as they are.  tone: how the samples encode light. */
@@ -232,6 +329,8 @@ int  dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_
 /* Read an uncompressed 8/16-bit gray/RGB TIFF (as written by dsdual4 or
  * re-saved by Preview). */
 int  dsd4_read_tiff(const char *path, dsd4_image *img);
+/* Read a DNG written by dsd4_write_dng (samples as stored: linear) */
+int  dsd4_read_dng(const char *path, dsd4_image *img);
 
 /* simple post-processing helpers for raw scans */
 /* negative -> positive in density space: film base (orange mask) removal and

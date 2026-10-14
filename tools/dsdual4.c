@@ -54,6 +54,21 @@ static const uint8_t *linear_icc(int gray, size_t *len) { return system_icc(gray
  * gray (Generic Gray Gamma 2.2), so TIFF and DNG are read the same way */
 static const uint8_t *gray22_icc(size_t *len) { return system_icc(2, len); }
 
+/* ~/Library/Application Support/dsdual4/<name> (DSD4_SUPPORT_DIR overrides
+ * the folder: tests), creating the folder */
+static const char *support_path(const char *name, char *b, size_t n)
+{
+    const char *dir = getenv("DSD4_SUPPORT_DIR"), *home = getenv("HOME");
+    char d[PATH_MAX];
+    if (dir) snprintf(d, sizeof d, "%s", dir);
+    else snprintf(d, sizeof d, "%s/Library/Application Support/dsdual4", home ? home : ".");
+    for (char *q = d + 1; *q; q++)
+        if (*q == '/') { *q = 0; mkdir(d, 0755); *q = '/'; }
+    mkdir(d, 0755);
+    snprintf(b, n, "%s/%s", d, name);
+    return b;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
@@ -78,6 +93,8 @@ static void usage(void)
 "  convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n"
 "                            apply the original Minolta negative processing to\n"
 "                            an existing raw negative scan (no scanner needed)\n"
+"  mtf FILE                  measure sharpness (MTF) on a scan of a razor blade\n"
+"                            turned 2-20 deg in a slide mount (no scanner needed)\n"
 "  deblur FILE.dng... [--level low|high] [-o OUT.dng]\n"
 "                            reduce camera blur (missed focus) in DNGs, kept\n"
 "                            raw; replaces each file unless -o.  Raw scans\n"
@@ -85,6 +102,9 @@ static void usage(void)
 "  research [nyquist|focus|jitter|yres|all] [--frame n] [--focus n] [-o dir]\n"
 "                            measure what multi-pass super-resolution could\n"
 "                            gain on this scanner (scans strips; -o saves DNGs)\n"
+"  research mtf|grain|noise  calibrate --experimental: mtf scans a razor blade\n"
+"                            (2-20 deg in a slide mount), grain then a film frame\n"
+"                            with flat areas (the MTF across), noise blank film\n"
 "  serve [--port n] [--film type] [--local]\n"
 "                            AirScan server: makes the scanner available in\n"
 "                            Image Capture and Preview (settings page at /).\n"
@@ -129,6 +149,11 @@ static void usage(void)
 "                            float DNG (Lightroom, macOS); 32 = 32-bit float\n"
 "                            (darktable, RawTherapee); 16 = 16-bit integer\n"
 "  --af <fast|classic>       autofocus: fast (default) or the original sequence\n"
+"  --experimental <list>     sharpen: undo the scanner's measured blur (MTF);\n"
+"                            denoise-low|denoise-high: profiled noise reduction;\n"
+"                            4000dpi: 4000 dpi output, sharpened (from 3200 dpi).\n"
+"                            Uses this scanner's calibration (research mtf,\n"
+"                            grain, noise) or else a typical Dual IV\n"
 "  --deblur <off|low|high>   reduce camera blur (missed focus), measured per\n"
 "                            region; sharp frames are left alone\n"
 "  --flip-x / --flip-y       mirror the image\n"
@@ -341,6 +366,9 @@ typedef struct {
     int dng_bits;     /* float DNG sample size: 0/half = 16-bit float, 32, or 16 = integer only */
     int frames;       /* scan-all: frames 1..frames (0: every frame of the holder) */
     int deblur;       /* DSD4_DEBLUR_OFF/LOW/HIGH: reduce camera blur */
+    int x_sharpen;    /* experimental: compensate the scanner's measured MTF */
+    int x_denoise;    /* experimental: DSD4_DENOISE_* with the noise profiles */
+    int x_4000;       /* experimental: 4000 dpi output (implies x_sharpen) */
 } scan_opts;
 
 /* frames scan-all covers: the requested count, at most the holder's */
@@ -356,10 +384,6 @@ static int parse_deblur(const char *v)
 }
 
 static const char *deblur_name(int d) { return d == DSD4_DEBLUR_HIGH ? "high" : d == DSD4_DEBLUR_LOW ? "low" : "off"; }
-static const char *deblur_suffix(int d)
-{
-    return d == DSD4_DEBLUR_HIGH ? ", deblur high" : d == DSD4_DEBLUR_LOW ? ", deblur low" : "";
-}
 
 static void report_deblur(const char *what, const dsd4_deblur_info *di)
 {
@@ -372,6 +396,89 @@ static void report_deblur(const char *what, const dsd4_deblur_info *di)
         fprintf(stderr, "%s: too few edges to measure the blur, unchanged\n", what);
 }
 
+/* 16-bit (or float) linear -> 8-bit, as the scanner's own 8-bit output */
+static void to_8bit(dsd4_image *im)
+{
+    const size_t n = (size_t)im->width * im->height * im->channels;
+    uint8_t *d = im->data;
+    for (size_t i = 0; i < n; i++) {
+        float v = im->bits == 32 ? ((float *)im->data)[i] : ((uint16_t *)im->data)[i] / 65535.0f;
+        v = v < 0 ? 0 : v > 1 ? 1 : v;
+        d[i] = (uint8_t)(v * 255 + 0.5f);
+    }
+    im->bits = 8;
+    im->stride = (size_t)im->width * im->channels;
+}
+
+/* --experimental sharpen,denoise-low|denoise-high,4000dpi */
+static int parse_experimental(const char *arg, scan_opts *o)
+{
+    char b[256];
+    snprintf(b, sizeof b, "%s", arg);
+    for (char *t = strtok(b, ","); t; t = strtok(NULL, ",")) {
+        if (!strcmp(t, "sharpen")) o->x_sharpen = 1;
+        else if (!strcmp(t, "denoise") || !strcmp(t, "denoise-low")) o->x_denoise = DSD4_DENOISE_LOW;
+        else if (!strcmp(t, "denoise-high")) o->x_denoise = DSD4_DENOISE_HIGH;
+        else if (!strcmp(t, "4000dpi") || !strcmp(t, "4000")) o->x_4000 = o->x_sharpen = 1;
+        else if (!strcmp(t, "off")) o->x_sharpen = o->x_denoise = o->x_4000 = 0;
+        else return -1;
+    }
+    return 0;
+}
+
+static int g_x_typical; /* 1: sharpness, 2: noise from the built-in typical Dual IV */
+
+/* the experimental processing for a scan: profiles from research mtf/noise.
+ * Returns 0 when nothing applies (ep untouched). */
+static int experimental_params(const scan_opts *o, const dsd4_scan_params *p, dsd4_enhance_params *ep,
+                               dsd4_mtf_profile *mtf, dsd4_noise_profile *np)
+{
+    if (p->preview || !(o->x_sharpen || o->x_denoise || o->x_4000)) return 0;
+    char path[PATH_MAX];
+    memset(ep, 0, sizeof *ep);
+    g_x_typical = 0;
+    if (o->x_sharpen) {
+        /* single reads are softer along the carriage: the matching profile.
+         * This scanner's own calibration, else a typical Dual IV at 70 %
+         * (other units' optics differ a little: under- not over-correct) */
+        const int multi = p->multi_sample > 1;
+        if (!dsd4_mtf_read(support_path(multi ? "scanner-mtf-multi.conf" : "scanner-mtf-1x.conf", path, sizeof path), mtf))
+            ep->strength = 1;
+        else if (!dsd4_mtf_default(multi, mtf)) { ep->strength = 0.7; g_x_typical |= 1; }
+        if (mtf->valid && p->dpi != mtf->dpi)
+            fprintf(stderr, "dsdual4: experimental sharpen works at %d dpi only (not sharpened)\n", mtf->dpi);
+        else if (mtf->valid) { ep->sharpen = 1; ep->mtf = mtf; }
+    }
+    if (o->x_denoise) {
+        ep->denoise = o->x_denoise;
+        if (!dsd4_noise_read(support_path("scanner-noise.conf", path, sizeof path), np)) ep->noise = np;
+        else if (!dsd4_noise_default(np)) { ep->noise = np; g_x_typical |= 2; }
+    }
+    if (o->x_4000) {
+        if (p->dpi == 3200) ep->target_dpi = 4000;
+        else fprintf(stderr, "dsdual4: experimental 4000dpi needs a 3200 dpi scan (kept at %d dpi)\n", p->dpi);
+    }
+    ep->samples = p->multi_sample;
+    ep->hdr = o->hdr_ev > 0;
+    return ep->sharpen || ep->denoise || ep->target_dpi;
+}
+
+static void report_experimental(const dsd4_enhance_params *ep, const dsd4_enhance_info *ei)
+{
+    if (g_verbose < 1) return;
+    fprintf(stderr, "experimental:");
+    if (ei->sharpened)
+        fprintf(stderr, " scanner MTF compensated (%s, boost up to %.1fx);",
+                g_x_typical & 1 ? "typical Dual IV, 70 %" : "this scanner's calibration", ei->gain_max);
+    if (ep->denoise)
+        fprintf(stderr, " denoise %s (sensor %s, grain profiled from %.0f%% of the frame);",
+                ep->denoise == DSD4_DENOISE_HIGH ? "high" : "low",
+                !ep->noise ? "not profiled" : g_x_typical & 2 ? "typical Dual IV" : "this scanner's profile",
+                100 * ei->flat_share);
+    if (ei->resampled) fprintf(stderr, " %d dpi", ep->target_dpi);
+    fputc('\n', stderr);
+}
+
 static int parse_scan_opts(int argc, char **argv, scan_opts *o)
 {
     static const struct option lo[] = {
@@ -380,7 +487,7 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
         { "samples", 1, 0, 's' }, { "invert", 0, 0, 'i' }, { "raw", 0, 0, 'r' }, { "flip-x", 0, 0, 'X' },
         { "flip-y", 0, 0, 'Y' }, { "rotate", 1, 0, 'R' }, { "output", 1, 0, 'o' }, { "minolta", 0, 0, 'M' },
         { "format", 1, 0, 'T' }, { "hdr", 2, 0, 'H' }, { "dng-bits", 1, 0, 'B' }, { "af", 1, 0, 'A' },
-        { "frames", 1, 0, 'N' }, { "deblur", 1, 0, 'D' }, { 0, 0, 0, 0 },
+        { "frames", 1, 0, 'N' }, { "deblur", 1, 0, 'D' }, { "experimental", 1, 0, 'x' }, { 0, 0, 0, 0 },
     };
     optind = 1;
     int c;
@@ -440,6 +547,12 @@ static int parse_scan_opts(int argc, char **argv, scan_opts *o)
         case 'D':
             if ((o->deblur = parse_deblur(optarg)) < 0) { fprintf(stderr, "bad deblur %s (off, low or high)\n", optarg); return -1; }
             break;
+        case 'x':
+            if (parse_experimental(optarg, o)) {
+                fprintf(stderr, "bad --experimental %s (sharpen, denoise-low, denoise-high, 4000dpi; comma-separated)\n", optarg);
+                return -1;
+            }
+            break;
         case 'N':
             o->frames = atoi(optarg);
             if (o->frames < 1 || o->frames > 6) { fprintf(stderr, "bad frame count %s (1-6)\n", optarg); return -1; }
@@ -479,12 +592,37 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     }
     dsd4_hdr_info hi;
     int r;
+    /* experimental: on the scanner's linear data, before inversion or film
+     * curves (the Minolta pipeline applies it itself, before its curves) */
+    dsd4_enhance_params xp;
+    dsd4_mtf_profile xmtf;
+    dsd4_noise_profile xnp;
+    const int xon = experimental_params(o, &p, &xp, &xmtf, &xnp);
+    if (xon && minolta) dsd4_set_enhance(s, &xp);
+    /* experimental processing needs 16 bits: scan so, reduce to 8 after
+     * (the Minolta pipeline does this itself) */
+    const int x8 = xon && !minolta && p.bits == 8;
+    if (x8) p.bits = 16;
     if (minolta && o->hdr_ev > 0) r = dsd4_scan_minolta_hdr(s, &p, o->hdr_ev, &im, &mi, &hi, on_progress, NULL);
     else if (o->hdr_ev > 0) r = dsd4_scan_hdr(s, &p, o->hdr_ev, &im, &hi, on_progress, NULL);
     else if (minolta && p.preview) r = dsd4_preview_minolta(s, &p, &im, &mi, on_progress, NULL);
     else if (minolta) r = dsd4_scan_minolta(s, &p, &im, &mi, on_progress, NULL);
     else r = dsd4_scan(s, &p, &im, on_progress, NULL);
     done_progress();
+    if (xon && minolta) {
+        dsd4_enhance_info ei;
+        dsd4_enhance_result(s, &ei);
+        dsd4_set_enhance(s, NULL);
+        if (!r) report_experimental(&xp, &ei);
+    } else if (xon && !r) {
+        dsd4_enhance_info ei;
+        on_progress(NULL, "experimental processing", -1);
+        r = dsd4_enhance(&im, &xp, &ei);
+        done_progress();
+        if (r) { fprintf(stderr, "dsdual4: experimental processing failed (%d)\n", r); dsd4_image_free(&im); return 1; }
+        report_experimental(&xp, &ei);
+        if (x8) to_8bit(&im);
+    }
     if (check(r, s, p.preview ? "preview" : "scan")) return 1;
     if (minolta && g_verbose >= 1)
         fprintf(stderr, "Minolta processing: AE exposure %.3f/%.3f/%.3f, black level %d/%d/%d\n", mi.exposure[0],
@@ -807,9 +945,37 @@ static void device_settings(scan_opts *c, int *display, int *open_after, int *us
                pn[pv->neg]);
         printf("    9  Autofocus        %s\n", c->p.af_mode == DSD4_AF_CLASSIC ? "classic (original sequence)"
                                                                               : "fast (about 3x quicker)");
+        {
+            char xs[128] = "";
+            if (c->x_4000) strcat(xs, "4000 dpi, ");
+            else if (c->x_sharpen) strcat(xs, "sharpen, ");
+            if (c->x_denoise) strcat(xs, c->x_denoise == DSD4_DENOISE_HIGH ? "denoise high, " : "denoise low, ");
+            if (*xs) xs[strlen(xs) - 2] = 0;
+            char mp[PATH_MAX], npth[PATH_MAX];
+            dsd4_mtf_profile mtf;
+            dsd4_noise_profile np;
+            const int hm = !dsd4_mtf_read(support_path("scanner-mtf-1x.conf", mp, sizeof mp), &mtf) &&
+                           !dsd4_mtf_read(support_path("scanner-mtf-multi.conf", mp, sizeof mp), &mtf);
+            const int hn = !dsd4_noise_read(support_path("scanner-noise.conf", npth, sizeof npth), &np);
+            printf("    e  Experimental     %s (profiles: %s)\n", *xs ? xs : "off",
+                   hm && hn ? "this scanner's" : !hm && !hn ? "typical Dual IV" : hm ? "own sharpness, typical noise"
+                                                                                : "typical sharpness, own noise");
+        }
         char b[PATH_MAX];
         if (ask("  Change which (Enter = done)? ", b, sizeof b) < 0 || !*b) return;
         switch (b[0]) {
+        case 'e':
+            printf("    Experimental, after Norman Koren's film-scanner MTF studies:\n"
+                   "    sharpen   undo the scanner's own blur (a typical Dual IV's, at 70 %%,\n"
+                   "              or yours: 'dsdual4 research mtf'); grain is not boosted\n"
+                   "    denoise   reduce sensor and colour noise (low), or also grain (high),\n"
+                   "              profiled per scan; sensor: typical, or 'dsdual4 research noise'\n"
+                   "    4000 dpi  3200 dpi scans sharpened and resampled to 4000 dpi\n");
+            c->x_sharpen = ask_int("    Sharpen: 1 = on, 0 = off", c->x_sharpen, 0, 1);
+            c->x_denoise = ask_int("    Denoise: 0 off, 1 low, 2 high", c->x_denoise, 0, 2);
+            c->x_4000 = ask_int("    4000 dpi output: 1 = on, 0 = off", c->x_4000, 0, 1);
+            if (c->x_4000) c->x_sharpen = 1;
+            break;
         case '1': {
             int v = ask_int("    0 = autofocus, or a manual position -200..200 (blank keeps)",
                             c->p.focus == DSD4_FOCUS_AUTO ? 0 : c->p.focus, -200, 200);
@@ -878,11 +1044,11 @@ static void save_settings(const menu_state *m)
     const dsd4_scan_params *p = &m->cfg->p;
     fprintf(f, "film=%d\ndpi=%d\narea=%d,%d,%d,%d\nnegatives=%d\nfocus=%d\nsamples=%d\ndisplay=%d\n"
                "flip=%d\nopen_after=%d\nprofile=%d\npreview_dpi=%d\npreview_af=%d\npreview_neg=%d\n"
-               "format=%s\nhdr=%d\naf=%s\ndeblur=%d\noutdir=%s\n",
+               "format=%s\nhdr=%d\naf=%s\ndeblur=%d\nx_sharpen=%d\nx_denoise=%d\nx_4000=%d\noutdir=%s\n",
             (int)p->film, p->dpi, p->x, p->y, p->w, p->h, *m->neg_mode, p->focus, p->multi_sample, *m->display,
             m->cfg->fx, *m->open_after, *m->use_profile, m->pv->dpi, m->pv->autofocus, m->pv->neg,
             m->cfg->dng ? "dng" : "tiff", m->cfg->hdr_ev > 0, p->af_mode == DSD4_AF_CLASSIC ? "classic" : "fast",
-            m->cfg->deblur, m->outdir);
+            m->cfg->deblur, m->cfg->x_sharpen, m->cfg->x_denoise, m->cfg->x_4000, m->outdir);
     fclose(f);
 }
 
@@ -917,6 +1083,9 @@ static void load_settings(menu_state *m)
         else if (!strcmp(line, "hdr")) m->cfg->hdr_ev = i ? 2.0 : 0;
         else if (!strcmp(line, "af")) p->af_mode = !strcmp(v, "classic") ? DSD4_AF_CLASSIC : DSD4_AF_FAST;
         else if (!strcmp(line, "deblur") && i >= 0 && i <= 2) m->cfg->deblur = i;
+        else if (!strcmp(line, "x_sharpen")) m->cfg->x_sharpen = i != 0;
+        else if (!strcmp(line, "x_denoise") && i >= 0 && i <= 2) m->cfg->x_denoise = i;
+        else if (!strcmp(line, "x_4000")) m->cfg->x_4000 = i != 0;
         else if (!strcmp(line, "outdir") && *v) snprintf(m->outdir, m->outlen, "%s", v);
     }
     fclose(f);
@@ -940,7 +1109,12 @@ static int run_menu(dsd4 *s, int fw_check)
     dsd4_info info;
     int have_info = dsd4_get_info(s, &info) == DSD4_OK;
 
-    printf("\n%sdsdual4 %s%s - Konica Minolta DiMAGE Scan Dual IV\n", C("1"), DSD4_VERSION, C("0"));
+    printf("\n%s"
+           "    _           _                 _   _ _\n"
+           " __| |  ___  __| |  _  _   __ _  | | | | |\n"
+           "/ _` | (_-< / _` | | || | / _` | | | |_  _|\n"
+           "\\__,_| /__/ \\__,_|  \\_,_| \\__,_| |_|   |_|%s\n", C("1"), C("0"));
+    printf("%s%s - Konica Minolta DiMAGE Scan Dual IV%s\n", C("2"), DSD4_VERSION, C("0"));
     printf("Type the letter or number of an option. 'h' shows instructions.\n");
     for (;;) {
         dsd4_holder_info h;
@@ -965,19 +1139,39 @@ static int run_menu(dsd4 *s, int fw_check)
         {
             char area[64];
             area_text(&cfg, area, sizeof area);
+            const int neg = is_negative(cfg.p.film);
+            printf(" Scan       %s, %s, %d dpi%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi, neg ? ", negatives: " : "",
+                   !neg ? "" : neg_mode == NEG_INVERT ? "simple invert" : neg_mode == NEG_MINOLTA ? "Minolta processing"
+                                                                       : "kept negative");
             if (cfg.dng)
-                printf(" Scan       %s, %s, %d dpi, DNG %s%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
-                       !is_negative(cfg.p.film) ? "raw" : neg_mode == NEG_INVERT ? "inverted"
-                       : neg_mode == NEG_MINOLTA ? "Minolta" : "raw",
-                       cfg.hdr_ev > 0 ? " + HDR" : "", deblur_suffix(cfg.deblur));
+                printf(" Output     DNG, %s, %s\n", !neg || neg_mode == NEG_RAW ? "raw (for raw converters)"
+                       : neg_mode == NEG_INVERT ? "positive (linear sRGB)" : "positive (Minolta film curves)", outdir);
             else
-                printf(" Scan       %s, %s, %d dpi%s%s%s\n", film_name(cfg.p.film), area, cfg.p.dpi,
-                       is_negative(cfg.p.film) ? ", " : "", is_negative(cfg.p.film) ? neg_mode_name(neg_mode) : "",
-                       deblur_suffix(cfg.deblur));
-            printf(" Device     focus %s, %s, %s\n", cfg.p.focus == DSD4_FOCUS_AUTO ? "auto" : "manual",
-                   display_scans ? "display-ready 8-bit" : "16-bit linear",
-                   use_profile && g_icc ? "profile embedded" : "no profile");
-            printf(" Output     %s\n", outdir);
+                printf(" Output     TIFF, %s%s, %s\n", display_scans ? "display-ready 8-bit" : "16-bit linear",
+                       use_profile && g_icc ? ", profile embedded" : "", outdir);
+            char q[160] = "";
+            if (cfg.p.multi_sample > 1) snprintf(q + strlen(q), sizeof q - strlen(q), "multi-sampling %dx, ", cfg.p.multi_sample);
+            if (cfg.dng && cfg.hdr_ev > 0) snprintf(q + strlen(q), sizeof q - strlen(q), "HDR, ");
+            if (cfg.deblur) snprintf(q + strlen(q), sizeof q - strlen(q), "deblur %s, ", deblur_name(cfg.deblur));
+            if (*q) q[strlen(q) - 2] = 0;
+            printf(" Quality    %s\n", *q ? q : "single pass, no deblur");
+            char x[160] = "";
+            if (cfg.x_4000) snprintf(x + strlen(x), sizeof x - strlen(x), "4000 dpi (sharpened), ");
+            else if (cfg.x_sharpen) snprintf(x + strlen(x), sizeof x - strlen(x), "sharpen, ");
+            if (cfg.x_denoise) snprintf(x + strlen(x), sizeof x - strlen(x), "denoise %s, ",
+                                        cfg.x_denoise == DSD4_DENOISE_HIGH ? "high" : "low");
+            if (*x) {
+                char mp[PATH_MAX];
+                dsd4_mtf_profile mtf;
+                dsd4_noise_profile np;
+                const int own = !dsd4_mtf_read(support_path(cfg.p.multi_sample > 1 ? "scanner-mtf-multi.conf"
+                                                                                   : "scanner-mtf-1x.conf", mp, sizeof mp), &mtf)
+                                && !dsd4_noise_read(support_path("scanner-noise.conf", mp, sizeof mp), &np);
+                x[strlen(x) - 2] = 0;
+                printf(" Experiment %s (%s profiles)\n", x, own ? "this scanner's" : "typical Dual IV");
+            } else printf(" Experiment off\n");
+            printf(" Device     focus %s (%s autofocus)\n", cfg.p.focus == DSD4_FOCUS_AUTO ? "auto" : "manual",
+                   cfg.p.af_mode == DSD4_AF_CLASSIC ? "classic" : "fast");
         }
         printf("%s──────────────────────────────────────────────────────%s\n", C("2"), C("0"));
 
@@ -1221,6 +1415,27 @@ static int cmd_service(int argc, char **argv)
     return 2;
 }
 
+/* any linear scan this tool wrote: DNG or TIFF */
+static int read_scan(const char *path, dsd4_image *im)
+{
+    int r = dsd4_read_dng(path, im);
+    return r == DSD4_ERR_PARAM ? dsd4_read_tiff(path, im) : r;
+}
+
+/* mtf FILE: slanted-edge MTF of a blade scan */
+static int cmd_mtf(int argc, char **argv)
+{
+    if (argc != 2 || argv[1][0] == '-') { usage(); return 2; }
+    dsd4_image im;
+    if (read_scan(argv[1], &im)) { fprintf(stderr, "dsdual4: cannot read %s (a dsdual4 TIFF or DNG)\n", argv[1]); return 1; }
+    printf("%s: %dx%d, %d dpi\n", argv[1], im.width, im.height, im.dpi);
+    dsd4_mtf_profile pr;
+    int r = dsd4_measure_edge_mtf(&im, &pr, stdout);
+    dsd4_image_free(&im);
+    if (r) { fprintf(stderr, "dsdual4: no usable slanted edge in %s\n", argv[1]); return 1; }
+    return 0;
+}
+
 /* deblur FILE.dng... [--level low|high] [--film ...] [-o OUT]: in place by default */
 static int cmd_deblur(int argc, char **argv)
 {
@@ -1343,6 +1558,7 @@ int main(int argc, char **argv)
 
     if (!strcmp(cmd, "convert")) return cmd_convert(cargc, cargv);
     if (!strcmp(cmd, "deblur")) return cmd_deblur(cargc, cargv);
+    if (!strcmp(cmd, "mtf")) return cmd_mtf(cargc, cargv);
     if (!strcmp(cmd, "service")) return cmd_service(cargc, cargv);
     if (!strcmp(cmd, "serve") && !use_sim) return cmd_serve(NULL, fw_check, cargc, cargv);
 
@@ -1457,14 +1673,55 @@ int main(int argc, char **argv)
         const char *which = "all";
         int k = 1;
         if (cargc > 1 && cargv[1][0] != '-') { which = cargv[1]; k = 2; }
-        static const char *tests[] = { "nyquist", "focus", "jitter", "yres", "all" };
+        static const char *tests[] = { "nyquist", "focus", "jitter", "yres", "all", "mtf", "noise", "grain" };
         int known = 0;
-        for (int i = 0; i < 5; i++) known |= !strcmp(which, tests[i]);
+        for (int i = 0; i < 8; i++) known |= !strcmp(which, tests[i]);
         if (!known || parse_scan_opts(cargc - k + 1, cargv + k - 1, &o)) { usage(); rc = 2; }
         else if (o.out && mkdir(o.out, 0755) && errno != EEXIST) { perror(o.out); rc = 1; }
         else if (!(rc = check(dsd4_initialize(s, fw_check, on_progress, NULL), s, "initialize"))) {
-            rc = check(dsd4_research(s, &o.p, which, o.out, stdout, on_progress, NULL), s, "research");
-            done_progress();
+            char path[PATH_MAX];
+            if (!strcmp(which, "mtf")) {
+                /* calibration for --experimental sharpen: a razor blade, scanned as a slide */
+                dsd4_mtf_profile pr[2];
+                o.p.film = DSD4_FILM_POSITIVE_COLOR;
+                rc = check(dsd4_research_mtf(s, &o.p, o.out, pr, stdout, on_progress, NULL), s, "research mtf");
+                done_progress();
+                for (int i = 0; i < 2 && !rc; i++) {
+                    /* a direction this blade could not measure: kept from before */
+                    dsd4_mtf_profile old;
+                    support_path(i ? "scanner-mtf-multi.conf" : "scanner-mtf-1x.conf", path, sizeof path);
+                    if (!dsd4_mtf_read(path, &old)) dsd4_mtf_merge(&pr[i], &old);
+                    if (dsd4_mtf_write(&pr[i], path) == DSD4_OK) printf("saved %s\n", path);
+                }
+            } else if (!strcmp(which, "grain")) {
+                /* the MTF across, from film grain: needs research mtf (along) first */
+                dsd4_mtf_profile pr[2];
+                dsd4_noise_profile np;
+                char p1[PATH_MAX], p2[PATH_MAX];
+                support_path("scanner-mtf-1x.conf", p1, sizeof p1);
+                support_path("scanner-mtf-multi.conf", p2, sizeof p2);
+                if (dsd4_mtf_read(p1, &pr[0]) || dsd4_mtf_read(p2, &pr[1]) || !pr[0].measured[1] || !pr[1].measured[1]) {
+                    fprintf(stderr, "dsdual4: research grain needs the MTF along the carriage first: research mtf\n");
+                    rc = 1;
+                } else {
+                    const int hn = !dsd4_noise_read(support_path("scanner-noise.conf", path, sizeof path), &np);
+                    rc = check(dsd4_research_grain(s, &o.p, o.out, hn ? &np : NULL, pr, stdout, on_progress, NULL), s,
+                               "research grain");
+                    done_progress();
+                    if (!rc && !dsd4_mtf_write(&pr[0], p1) && !dsd4_mtf_write(&pr[1], p2)) printf("saved %s\nsaved %s\n", p1, p2);
+                }
+            } else if (!strcmp(which, "noise")) {
+                /* calibration for --experimental denoise: an empty slide mount */
+                dsd4_noise_profile np;
+                o.p.film = DSD4_FILM_POSITIVE_COLOR;
+                rc = check(dsd4_research_noise(s, &o.p, o.out, &np, stdout, on_progress, NULL), s, "research noise");
+                done_progress();
+                if (!rc && dsd4_noise_write(&np, support_path("scanner-noise.conf", path, sizeof path)) == DSD4_OK)
+                    printf("saved %s\n", path);
+            } else {
+                rc = check(dsd4_research(s, &o.p, which, o.out, stdout, on_progress, NULL), s, "research");
+                done_progress();
+            }
         }
     } else if (!strcmp(cmd, "serve")) {
         rc = cmd_serve(s, fw_check, cargc, cargv);

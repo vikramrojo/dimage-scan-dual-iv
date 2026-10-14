@@ -105,7 +105,7 @@ for f in inv-bw-nega inv-nega; do
 done
 DSD4_SIM_FILM=nega run minolta-preview 390x585 preview --film nega --minolta --dpi 400 --focus 37 -o "$OUT/minolta-preview.tiff"
 if clang -O1 -Iinclude tests/minolta_cache.c build/libdsdual4.a -framework IOKit -framework CoreFoundation \
-       -framework ApplicationServices -framework ImageIO -o "$OUT/minolta_cache" 2>"$OUT/mc.log"; then
+       -framework ApplicationServices -framework ImageIO -framework Accelerate -o "$OUT/minolta_cache" 2>"$OUT/mc.log"; then
     if "$OUT/minolta_cache"; then pass=$((pass+1)); else failn=$((failn+1)); fi
 else echo "FAIL minolta-preview-reuse (build)"; failn=$((failn+1)); fi
 
@@ -214,6 +214,48 @@ if "$BIN" deblur "$OUT/dng-raw.dng" -o "$OUT/x.dng" >/dev/null 2>&1; then
     echo "FAIL deblur-raw-needs-film accepted"; failn=$((failn+1)); else echo "ok   deblur-raw-needs-film"; pass=$((pass+1)); fi
 check deblur-raw-with-film "$BIN" deblur "$OUT/dng-raw.dng" --film slide -o "$OUT/deblur-raw.dng"
 DSD4_SIM_FILM=nega run scan-deblur 390x585 scan --film nega --minolta --dpi 400 --focus 37 --deblur high -o "$OUT/scan-deblur.tiff"
+
+# --- experimental 4000 dpi: calibration and processing (profiles in $OUT)
+export DSD4_SUPPORT_DIR="$OUT/support"
+if clang -O2 -Iinclude tests/enhance_test.c build/libdsdual4.a -framework IOKit -framework CoreFoundation \
+       -framework ApplicationServices -framework ImageIO -framework Accelerate -o "$OUT/enhance_test" 2>"$OUT/et.log"; then
+    eres=$("$OUT/enhance_test"); echo "$eres"
+    pass=$((pass + $(grep -c '^ok' <<< "$eres"))); failn=$((failn + $(grep -c '^FAIL' <<< "$eres")))
+else echo "FAIL enhance_test (build)"; failn=$((failn+1)); fi
+# without calibration: the built-in typical Dual IV, at reduced strength
+DSD4_SIM_CHART=edge run x-uncalibrated 400x400 -v scan --dpi 3200 --focus 37 --raw --area 1360,2140,400,400 --experimental sharpen,denoise-low -o "$OUT/x-uncalibrated.tiff"
+check x-uncalibrated-typical grep -q "typical Dual IV, 70 %.*denoise low (sensor typical Dual IV" "$OUT/x-uncalibrated.log"
+# research mtf: the simulated lens (gaussian 0.6 across, 0.8 along) x pixel box
+# has MTF50 0.281 / 0.220 cycles/px across the 5 degree edge
+export DSD4_SIM_CHART=edge DSD4_SIM_PSF=0.6 DSD4_SIM_PSF_Y=0.8 DSD4_SIM_NOISE=0.002
+run research-mtf - research mtf --focus 37
+mx=$(grep -A1 "across (CCD" "$OUT/research-mtf.log" | sed -n 's/.*MTF50 \([0-9.]*\) cycles.*/\1/p' | head -1)
+my=$(grep -A1 "along (carriage" "$OUT/research-mtf.log" | sed -n 's/.*MTF50 \([0-9.]*\) cycles.*/\1/p' | head -1)
+echo "     research mtf: MTF50 across $mx (analytic 0.281), along $my (analytic 0.220)"
+check research-mtf-accurate eval "awk -v a=\"$mx\" -v b=\"$my\" 'BEGIN { exit !(a > 0.267 && a < 0.295 && b > 0.209 && b < 0.231) }'"
+check research-mtf-saved eval '[ -s "$OUT/support/scanner-mtf-1x.conf" ] && [ -s "$OUT/support/scanner-mtf-multi.conf" ]'
+run research-noise - research noise --focus 37
+nz=$(sed -n 's/.*G: signal [0-9.]* noise \([0-9.]*\).*/\1/p' "$OUT/research-noise.log" | head -1)
+echo "     research noise: sensor noise $nz (simulated 0.002)"
+check research-noise-accurate eval "awk -v a=\"$nz\" 'BEGIN { exit !(a > 0.0018 && a < 0.0022) }'"
+# sharpen: the blade's MTF50 up; 4000 dpi: size, resolution, still a raw DNG
+run x-plain 1100x1100 scan --dpi 3200 --focus 37 --raw --area 1000,1800,1100,1100 -o "$OUT/x-plain.tiff"
+run x-sharp 1100x1100 scan --dpi 3200 --focus 37 --raw --area 1000,1800,1100,1100 --experimental sharpen -o "$OUT/x-sharp.tiff"
+"$BIN" mtf "$OUT/x-plain.tiff" > "$OUT/x-plain.mtf"; "$BIN" mtf "$OUT/x-sharp.tiff" > "$OUT/x-sharp.mtf"
+a=$(grep -A1 "across (CCD" "$OUT/x-plain.mtf" | sed -n 's/.*= \([0-9.]*\) lp\/mm.*/\1/p')
+b=$(grep -A1 "across (CCD" "$OUT/x-sharp.mtf" | sed -n 's/.*= \([0-9.]*\) lp\/mm.*/\1/p')
+echo "     experimental sharpen: blade MTF50 $a -> $b lp/mm on film"
+check x-sharpen-mtf50 gt "$b" "$(awk -v a="$a" 'BEGIN{print a*1.3}')"
+run x-4000 1375x1375 scan --dpi 3200 --focus 37 --area 1000,1800,1100,1100 --format dng --experimental 4000dpi,denoise-low -o "$OUT/x-4000.dng"
+check x-4000-raw-dng grep -q "photometric 34892 1375x1375" <<< "$($IC dng "$OUT/x-4000.dng")"
+# 8-bit output: processed at 16 bits, then reduced (the scan is not lost)
+run x-8bit 1100x1100 scan --dpi 3200 --focus 37 --bits 8 --area 1000,1800,1100,1100 --experimental sharpen,denoise-low -o "$OUT/x-8bit.tiff"
+check x-8bit-depth eval '[ "$(sips -g bitsPerSample "$OUT/x-8bit.tiff" | awk "/bitsPerSample/{print \$2}")" = 8 ]'
+unset DSD4_SIM_CHART DSD4_SIM_PSF DSD4_SIM_PSF_Y DSD4_SIM_NOISE
+# Minolta: processed before the film curves
+DSD4_SIM_FILM=nega run x-minolta 488x731 -v scan --film nega --minolta --dpi 3200 --focus 37 --area 800,1200,390,585 --experimental 4000dpi,denoise-high -o "$OUT/x-minolta.tiff"
+check x-minolta-processed grep -q "experimental: scanner MTF compensated" "$OUT/x-minolta.log"
+unset DSD4_SUPPORT_DIR
 
 # --- super-resolution research: the measurements recover the simulated optics
 export DSD4_SIM_CHART=star

@@ -350,6 +350,14 @@ int dsd4_scan_minolta_hdr(dsd4 *s, const dsd4_scan_params *sp, double ev, dsd4_i
     for (int c = 0; c < 3; c++) fp.exposure[c] = gain[c];
     r = ev > 0 ? dsd4_scan_hdr(s, &fp, ev, img, hdr, cb, ud) : dsd4_scan(s, &fp, img, cb, ud);
     if (r) { free(tabs); return r; }
+    if (s->enhance) {
+        /* experimental: on the scanner's linear data, before the curves */
+        dsd4_enhance_params ep = *s->enhance;
+        ep.samples = fp.multi_sample;
+        ep.hdr = ev > 0;
+        if (cb) cb(ud, "experimental processing", -1);
+        if ((r = dsd4_enhance(img, &ep, &s->enhance_info))) { free(tabs); dsd4_image_free(img); return r; }
+    }
     if (cb) cb(ud, "applying film curves", -1);
     apply_lut(img, final_tab);
     free(tabs);
