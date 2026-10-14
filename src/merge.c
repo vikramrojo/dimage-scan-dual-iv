@@ -139,7 +139,7 @@ int dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *sp, double ev, dsd4_image *im
     if (!(ev > 0 && ev <= 6) || sp->preview) return DSD4_ERR_PARAM;
     dsd4_scan_params p = *sp;
     p.float_out = 1;
-    p.raw = 1;
+    p.raw = 1; /* both passes ungained, so the merge sees the true exposure ratio */
     int r;
     /* frame and focus once, shared by both passes */
     if (p.frame > 0) {
@@ -172,9 +172,15 @@ int dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *sp, double ev, dsd4_image *im
 
     if (cb) cb(ud, "aligning and merging", -1);
     const int ch = a.channels, w = a.width, h = a.height;
-    const double shift = find_shift(&a, &b, k);
-    double ratio[3] = { k, k, k };
-    for (int c = 0; c < ch; c++) ratio[c] = measure_ratio(&a, &b, c, shift, k);
+    /* expected ratio: what the passes were actually exposed with.  Exposure
+     * the hardware could not give is left out of raw scans (raw_gain), so a
+     * clamped long pass is less than k brighter */
+    double nominal[3];
+    for (int c = 0; c < 3; c++)
+        nominal[c] = a.raw_gain[c] > 0 && b.raw_gain[c] > 0 ? k * a.raw_gain[c] / b.raw_gain[c] : k;
+    const double shift = find_shift(&a, &b, nominal[ch == 3 ? 1 : 0]);
+    double ratio[3] = { nominal[0], nominal[1], nominal[2] };
+    for (int c = 0; c < ch; c++) ratio[c] = measure_ratio(&a, &b, c, shift, nominal[c]);
     if (ch == 1) ratio[1] = ratio[2] = ratio[0];
     const double got = log2((ratio[0] + ratio[1] + ratio[2]) / 3);
     dsd4_logf(s, 1, "HDR: second pass +%.2f EV (ratio %.2f/%.2f/%.2f), offset %.2f lines", got, ratio[0],
@@ -185,6 +191,7 @@ int dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *sp, double ev, dsd4_image *im
     const float *B = (const float *)b.data;
     const int di = (int)floor(shift);
     const double f = shift - di;
+    double used[3] = { 0, 0, 0 };
     for (int y = 0; y < h; y++) {
         int y0 = y + di, y1 = y0 + 1;
         if (y0 < 0 || y1 >= h) continue; /* edge rows: short pass only */
@@ -195,9 +202,21 @@ int dsd4_scan_hdr(dsd4 *s, const dsd4_scan_params *sp, double ev, dsd4_image *im
                 double t = l <= CLIP_LO ? 1 : l >= CLIP_HI ? 0 : (CLIP_HI - l) / (CLIP_HI - CLIP_LO);
                 t = t * t * (3 - 2 * t);
                 A[i] = (float)(t * l / ratio[c] + (1 - t) * A[i]);
+                used[c] += t;
             }
     }
+    /* share of the picture taken from the long pass: where HDR helps */
+    for (int c = 0; c < ch; c++) used[c] *= 100.0 / ((double)w * h);
+    if (ch == 1) dsd4_logf(s, 1, "HDR: long pass used for %.0f%% of the picture", used[0]);
+    else dsd4_logf(s, 1, "HDR: long pass used for %.0f%%/%.0f%%/%.0f%% of the picture", used[0], used[1], used[2]);
     dsd4_image_free(&b);
+    if (!sp->raw) {
+        /* processed output: the digital gain a normal scan applies, after the merge */
+        const size_t n = (size_t)w * h;
+        for (size_t i = 0; i < n; i++)
+            for (int c = 0; c < ch; c++) A[i * ch + c] *= (float)a.raw_gain[c];
+        for (int c = 0; c < 3; c++) a.digital_gain[c] = a.raw_gain[c];
+    }
     *img = a;
     if (info) {
         info->ev = got;

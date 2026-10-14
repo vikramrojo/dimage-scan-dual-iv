@@ -2,7 +2,7 @@ CC      ?= clang
 ARCHS   ?= -arch arm64 -arch x86_64
 CFLAGS  ?= -O2 -g
 CFLAGS  += -ffp-contract=off -std=c11 -Wall -Wextra -Wno-unused-parameter -Iinclude -Isrc $(ARCHS) -mmacosx-version-min=11.0
-LDLIBS  += -framework IOKit -framework CoreFoundation -framework ApplicationServices -framework ImageIO -lm
+LDLIBS  += -framework IOKit -framework CoreFoundation -framework ApplicationServices -framework ImageIO -framework Accelerate -lm
 PREFIX  ?= /usr/local
 
 # version: 1.1.<commits>, plus the commit id for --version
@@ -11,7 +11,7 @@ GIT_SHA   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 GIT_DIRTY := $(shell test -n "$$(git status --porcelain --untracked-files=no 2>/dev/null)" && echo +dirty)
 VERSION   ?= 1.1.$(GIT_COUNT)
 
-LIB_SRC = src/avision.c src/avlib.c src/calib.c src/scanner.c src/image.c src/usb_macos.c src/sim.c src/escl.c src/minolta.c src/minolta_ae.c src/minolta_lut.c src/dng.c src/merge.c src/superres.c src/research.c
+LIB_SRC = src/avision.c src/avlib.c src/calib.c src/scanner.c src/image.c src/usb_macos.c src/sim.c src/escl.c src/minolta.c src/minolta_ae.c src/minolta_lut.c src/dng.c src/merge.c src/superres.c src/research.c src/deblur.c
 LIB_OBJ = $(LIB_SRC:src/%.c=build/%.o)
 
 all: build/libdsdual4.a build/dsdual4

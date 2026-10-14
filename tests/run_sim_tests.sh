@@ -71,6 +71,12 @@ PY=${PYTHON:-python3}
 IC="$PY tests/imgcheck.py"
 gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 
+# scan-all of a short strip: only the frames asked for
+run scanall4    -          scan-all --dpi 200 --focus 37 --frames 4 -o "$OUT/strip4"
+check scanall-frames eval '[ -f "$OUT/strip4-4.tiff" ] && [ ! -e "$OUT/strip4-5.tiff" ] && [ -f "$OUT/scanall-6.tiff" ]'
+if DSD4_SIM_TRACE=/dev/null "$BIN" --sim -q scan-all --frames 7 -o "$OUT/x" >/dev/null 2>&1; then
+    echo "FAIL frames-7 accepted"; failn=$((failn+1)); else echo "ok   frames-7-rejected"; pass=$((pass+1)); fi
+
 # --- fast autofocus: same result as the original sequence, far fewer lens moves
 run af-fast     -          autofocus --frame 2 --af fast
 run af-classic  -          autofocus --frame 2 --af classic
@@ -181,8 +187,33 @@ if swiftc -O tests/raw_render.swift -o "$OUT/raw_render" 2>"$OUT/rr.log"; then
     echo "     B&W raw DNG, float vs integer as macOS shows them: dE mean $bde max $bmax"
     check bw-float-dng-on-macos eval 'gt 0.5 "$bde" && gt 1 "$bmax"' 
 else echo "FAIL raw_render (build)"; failn=$((failn+1)); fi
-if "$BIN" --sim -q scan --film nega --minolta --hdr --format dng -o "$OUT/x.dng" >/dev/null 2>&1; then
-    echo "FAIL minolta-hdr accepted"; failn=$((failn+1)); else echo "ok   minolta-hdr-refused"; pass=$((pass+1)); fi
+# Minolta + HDR: the film curves on the merged scan; the same picture as a
+# single-pass Minolta DNG, with less noise in the dense parts of the negative
+DSD4_SIM_FILM=nega run mdng-hdr-clean 390x585 scan --film nega --minolta --dpi 400 --focus 37 --hdr --format dng -o "$OUT/mdng-hdr-clean.dng"
+DSD4_SIM_FILM=nega DSD4_SIM_NOISE=0.01 run mdng-noisy 390x585 scan --film nega --minolta --dpi 400 --focus 37 --format dng -o "$OUT/mdng-noisy.dng"
+DSD4_SIM_FILM=nega DSD4_SIM_NOISE=0.01 run mdng-hdr 390x585 -v scan --film nega --minolta --dpi 400 --focus 37 --hdr --format dng -o "$OUT/mdng-hdr.dng"
+check minolta-hdr-curves grep -q "Minolta DNG (film curves applied)" "$OUT/mdng-hdr.log"
+mc=$($IC noise "$OUT/mdng-nega.dng" "$OUT/mdng-hdr-clean.dng" | cut -d' ' -f1)
+# (green: red's long pass clips on an orange-mask negative the AE already fills)
+mn=$($IC hpnoise "$OUT/mdng-nega.dng" "$OUT/mdng-noisy.dng" | cut -d' ' -f2)
+mh=$($IC hpnoise "$OUT/mdng-nega.dng" "$OUT/mdng-hdr.dng" | cut -d' ' -f2)
+echo "     Minolta HDR DNG vs single pass: rms $mc (noiseless); green noise $mn -> $mh"
+check minolta-hdr-matches gt 0.002 "$mc"
+check minolta-hdr-less-noise gt "$(awk -v a="$mn" 'BEGIN{print a*0.85}')" "$mh"
+
+# --- deblur: measured blur, sharpening, sharp pictures untouched (synthetic film)
+if clang -O2 -Iinclude tests/deblur_test.c build/libdsdual4.a -framework IOKit -framework CoreFoundation \
+       -framework ApplicationServices -framework ImageIO -framework Accelerate -o "$OUT/deblur_test" 2>"$OUT/dt.log"; then
+    dres=$("$OUT/deblur_test" "$OUT"); echo "$dres"
+    pass=$((pass + $(grep -c '^ok' <<< "$dres"))); failn=$((failn + $(grep -c '^FAIL' <<< "$dres")))
+else echo "FAIL deblur_test (build)"; failn=$((failn+1)); fi
+# the command: in place on a Minolta DNG (positive, from its profile name)
+cp "$OUT/mdng-nega.dng" "$OUT/deblur.dng"
+check deblur-command-in-place "$BIN" deblur "$OUT/deblur.dng" --level low
+if "$BIN" deblur "$OUT/dng-raw.dng" -o "$OUT/x.dng" >/dev/null 2>&1; then
+    echo "FAIL deblur-raw-needs-film accepted"; failn=$((failn+1)); else echo "ok   deblur-raw-needs-film"; pass=$((pass+1)); fi
+check deblur-raw-with-film "$BIN" deblur "$OUT/dng-raw.dng" --film slide -o "$OUT/deblur-raw.dng"
+DSD4_SIM_FILM=nega run scan-deblur 390x585 scan --film nega --minolta --dpi 400 --focus 37 --deblur high -o "$OUT/scan-deblur.tiff"
 
 # --- super-resolution research: the measurements recover the simulated optics
 export DSD4_SIM_CHART=star
