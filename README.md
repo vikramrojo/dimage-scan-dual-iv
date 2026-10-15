@@ -15,7 +15,7 @@ in user space. There is no kernel extension.
 ### Simple
 
 1. Download `dsd4-<version>.pkg` from
-   [Releases](https://github.com/vikramrojo/minolta-scan-dual-iv/releases/latest).
+   [Releases](https://github.com/vikramrojo/dimage-scan-dual-iv/releases/latest).
 2. Open it and follow the installer.
 3. Connect and power on the scanner. Insert a film holder and close the front
    door.
