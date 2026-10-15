@@ -21,7 +21,7 @@ void dsd4_logf(dsd4 *s, int level, const char *fmt, ...)
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     if (s->log) s->log(s->log_ud, level, buf);
-    else fprintf(stderr, "dsdual4: %s\n", buf);
+    else fprintf(stderr, "dsd4: %s\n", buf);
 }
 
 /* Mac OS ticks are 1/60 s.  The original library busy-waits on TickCount(). */

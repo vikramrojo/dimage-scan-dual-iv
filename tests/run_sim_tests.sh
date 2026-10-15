@@ -2,7 +2,7 @@
 # End-to-end tests of the CLI against the protocol simulator.
 set -u
 cd "$(dirname "$0")/.."
-BIN=./build/dsdual4
+BIN=./build/dsd4
 OUT=$(mktemp -d)
 export DSD4_TIME_SCALE=0.002 DSD4_NO_CACHE=1
 FW=${DSD4_FIRMWARE:-}
@@ -104,7 +104,7 @@ for f in inv-bw-nega inv-nega; do
     check $f-linear-profile grep -q "profile: .*Linear" <<< "$(sips -g profile "$OUT/$f.tiff")"
 done
 DSD4_SIM_FILM=nega run minolta-preview 390x585 preview --film nega --minolta --dpi 400 --focus 37 -o "$OUT/minolta-preview.tiff"
-if clang -O1 -Iinclude tests/minolta_cache.c build/libdsdual4.a -framework IOKit -framework CoreFoundation \
+if clang -O1 -Iinclude tests/minolta_cache.c build/libdsd4.a -framework IOKit -framework CoreFoundation \
        -framework ApplicationServices -framework ImageIO -framework Accelerate -o "$OUT/minolta_cache" 2>"$OUT/mc.log"; then
     if "$OUT/minolta_cache"; then pass=$((pass+1)); else failn=$((failn+1)); fi
 else echo "FAIL minolta-preview-reuse (build)"; failn=$((failn+1)); fi
@@ -202,7 +202,7 @@ check minolta-hdr-matches gt 0.002 "$mc"
 check minolta-hdr-less-noise gt "$(awk -v a="$mn" 'BEGIN{print a*0.85}')" "$mh"
 
 # --- deblur: measured blur, sharpening, sharp pictures untouched (synthetic film)
-if clang -O2 -Iinclude tests/deblur_test.c build/libdsdual4.a -framework IOKit -framework CoreFoundation \
+if clang -O2 -Iinclude tests/deblur_test.c build/libdsd4.a -framework IOKit -framework CoreFoundation \
        -framework ApplicationServices -framework ImageIO -framework Accelerate -o "$OUT/deblur_test" 2>"$OUT/dt.log"; then
     dres=$("$OUT/deblur_test" "$OUT"); echo "$dres"
     pass=$((pass + $(grep -c '^ok' <<< "$dres"))); failn=$((failn + $(grep -c '^FAIL' <<< "$dres")))
@@ -217,7 +217,7 @@ DSD4_SIM_FILM=nega run scan-deblur 390x585 scan --film nega --minolta --dpi 400 
 
 # --- experimental 4000 dpi: calibration and processing (profiles in $OUT)
 export DSD4_SUPPORT_DIR="$OUT/support"
-if clang -O2 -Iinclude tests/enhance_test.c build/libdsdual4.a -framework IOKit -framework CoreFoundation \
+if clang -O2 -Iinclude tests/enhance_test.c build/libdsd4.a -framework IOKit -framework CoreFoundation \
        -framework ApplicationServices -framework ImageIO -framework Accelerate -o "$OUT/enhance_test" 2>"$OUT/et.log"; then
     eres=$("$OUT/enhance_test"); echo "$eres"
     pass=$((pass + $(grep -c '^ok' <<< "$eres"))); failn=$((failn + $(grep -c '^FAIL' <<< "$eres")))
@@ -256,6 +256,22 @@ unset DSD4_SIM_CHART DSD4_SIM_PSF DSD4_SIM_PSF_Y DSD4_SIM_NOISE
 DSD4_SIM_FILM=nega run x-minolta 488x731 -v scan --film nega --minolta --dpi 3200 --focus 37 --area 800,1200,390,585 --experimental 4000dpi,denoise-high -o "$OUT/x-minolta.tiff"
 check x-minolta-processed grep -q "experimental: scanner MTF compensated" "$OUT/x-minolta.log"
 unset DSD4_SUPPORT_DIR
+
+# --- renamed from dsdual4: settings and calibrations move over once; DNGs
+# written under the old name are still recognised
+MH="$OUT/oldhome"
+mkdir -p "$MH/Library/Application Support/dsdual4"
+printf 'dpi=800\n' > "$MH/Library/Application Support/dsdual4/menu.conf"
+printf 'kept\n' > "$MH/Library/Application Support/dsdual4/scanner-noise.conf"
+printf 'q\n' | HOME="$MH" DSD4_SUPPORT_DIR= "$BIN" --sim menu >/dev/null 2>&1
+check renamed-settings-moved eval '[ ! -e "$MH/Library/Application Support/dsdual4" ] && grep -q "dpi=800" "$MH/Library/Application Support/dsd4/menu.conf" && grep -q kept "$MH/Library/Application Support/dsd4/scanner-noise.conf"'
+$PY - "$OUT/mdng-nega.dng" "$OUT/legacy.dng" <<'PYEOF'
+import sys
+d = open(sys.argv[1], 'rb').read()
+assert d.count(b'dsd4 Minolta film curve') == 1
+open(sys.argv[2], 'wb').write(d.replace(b'dsd4 Minolta film curve', b'dsdual4 Minolta film cu'))
+PYEOF
+check renamed-old-dng-recognised "$BIN" deblur "$OUT/legacy.dng" --level low
 
 # --- super-resolution research: the measurements recover the simulated optics
 export DSD4_SIM_CHART=star

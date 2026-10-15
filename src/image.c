@@ -7,6 +7,8 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <sys/stat.h>
 
 static void w16(FILE *f, uint16_t v) { fputc(v & 0xff, f); fputc(v >> 8, f); }
 static void w32(FILE *f, uint32_t v) { w16(f, (uint16_t)v); w16(f, (uint16_t)(v >> 16)); }
@@ -38,7 +40,7 @@ int dsd4_write_tiff_icc(const dsd4_image *img, const char *path, const void *icc
     const uint32_t xres_off = bps_off + 8;
     const uint32_t yres_off = xres_off + 8;
     const uint32_t sw_off = yres_off + 8;
-    static const char sw[] = "dsdual4 (DiMAGE Scan Dual IV driver)";
+    static const char sw[] = "dsd4 (DiMAGE Scan Dual IV driver)";
     const uint32_t icc_off = (sw_off + (uint32_t)sizeof sw + 3) & ~3u;
     const uint32_t data_off = (icc_off + (uint32_t)icc_len + 15) & ~15u;
 
@@ -296,4 +298,29 @@ out:
 #undef U32
     free(d);
     return r;
+}
+
+/* The settings and calibration folder, ~/Library/Application Support/dsd4
+ * (DSD4_SUPPORT_DIR overrides it: tests), created if needed.  Before the
+ * rename to dsd4 it was .../dsdual4: moved over once, with the menu
+ * settings, calibrations and calibration cache in it. */
+int dsd4_support_path(const char *name, char *out, size_t n)
+{
+    const char *env = getenv("DSD4_SUPPORT_DIR"), *home = getenv("HOME");
+    char d[1024];
+    if (env && *env) snprintf(d, sizeof d, "%s", env);
+    else {
+        snprintf(d, sizeof d, "%s/Library/Application Support/dsd4", home ? home : ".");
+        struct stat st;
+        if (stat(d, &st) != 0) {
+            char old[1024];
+            snprintf(old, sizeof old, "%s/Library/Application Support/dsdual4", home ? home : ".");
+            if (stat(old, &st) == 0 && S_ISDIR(st.st_mode)) rename(old, d);
+        }
+    }
+    for (char *q = d + 1; *q; q++)
+        if (*q == '/') { *q = 0; mkdir(d, 0755); *q = '/'; }
+    mkdir(d, 0755);
+    int k = snprintf(out, n, "%s/%s", d, name);
+    return k > 0 && (size_t)k < n ? 0 : -1;
 }

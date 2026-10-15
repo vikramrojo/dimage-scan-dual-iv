@@ -388,7 +388,7 @@ static void respond(int fd, const request *rq, int code, const char *reason, con
 {
     char h[1024];
     int k = snprintf(h, sizeof h,
-                     "HTTP/1.1 %d %s\r\nServer: dsdual4\r\nContent-Length: %zu\r\n%s%s%s%s\r\n",
+                     "HTTP/1.1 %d %s\r\nServer: dsd4\r\nContent-Length: %zu\r\n%s%s%s%s\r\n",
                      code, reason, len, ctype ? "Content-Type: " : "", ctype ? ctype : "", ctype ? "\r\n" : "",
                      extra ? extra : "");
     send_all(fd, h, (size_t)k);
@@ -699,7 +699,7 @@ static void ui_page(sbuf *b, const char *msg)
               "<button name=do value=autofocus>Autofocus now</button><button name=do value=calibrate>Recalibrate</button>"
               "</fieldset></form><p>Scan from <b>Image Capture</b> or <b>Preview &rarr; File &rarr; Import from Scanner</b>. "
               "Scanner area: 0.97 &times; 1.46 in (one 35 mm frame). The settings above apply to every scan.</p>"
-              "<p>Raw DNG and HDR scans are made from the dsdual4 menu or command line (Image Capture cannot receive DNG).</p></body></html>",
+              "<p>Raw DNG and HDR scans are made from the dsd4 menu or command line (Image Capture cannot receive DNG).</p></body></html>",
            g.invert == 0 ? " selected" : "", g.invert == 1 ? " selected" : "", g.invert == 2 ? " selected" : "");
 }
 
@@ -832,7 +832,7 @@ static DNSServiceRef bonjour_register(int local_only, const char *admin, const c
     TXT("duplex", "F");
     TXT("uuid", uuidtxt);
     TXT("adminurl", admin);
-    TXT("note", "film scanner (dsdual4)");
+    TXT("note", "film scanner (dsd4)");
 #undef TXT
     DNSServiceRef sd = NULL;
     DNSServiceErrorType e = DNSServiceRegister(&sd, 0, local_only ? kDNSServiceInterfaceIndexLocalOnly : 0,

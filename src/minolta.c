@@ -377,7 +377,7 @@ int dsd4_scan_minolta_hdr(dsd4 *s, const dsd4_scan_params *sp, double ev, dsd4_i
  * exposure is then applied by scaling the scan likewise (the scanner's
  * response is linear, so this approximates the rescan the live pipeline
  * does; clipped highlights in the input stay clipped).  The shading tables
- * come from the calibration cache written by "dsdual4 init". */
+ * come from the calibration cache written by "dsd4 init". */
 int dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_exposure[3], dsd4_image *out,
                          dsd4_minolta_info *info)
 {
@@ -391,12 +391,11 @@ int dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_e
 
     static uint16_t dark[3][SHD_W], white[3][SHD_W];
     char path[1024];
-    const char *home = getenv("HOME");
     FILE *f;
-    snprintf(path, sizeof path, "%s/Library/Application Support/dsdual4/darkAvg.bin", home ? home : ".");
+    dsd4_support_path("darkAvg.bin", path, sizeof path);
     if (!(f = fopen(path, "rb")) || fread(dark, 1, sizeof dark, f) != sizeof dark) { if (f) fclose(f); return DSD4_ERR_IO; }
     fclose(f);
-    snprintf(path, sizeof path, "%s/Library/Application Support/dsdual4/whiteAvg.bin", home ? home : ".");
+    dsd4_support_path("whiteAvg.bin", path, sizeof path);
     if (!(f = fopen(path, "rb")) || fread(white, 1, sizeof white, f) != sizeof white) { if (f) fclose(f); return DSD4_ERR_IO; }
     fclose(f);
 

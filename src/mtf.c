@@ -333,7 +333,7 @@ int dsd4_mtf_write(const dsd4_mtf_profile *pr, const char *path)
 {
     FILE *f = fopen(path, "w");
     if (!f) return DSD4_ERR_IO;
-    fprintf(f, "# dsdual4 scanner MTF (slanted edge): 0..1 cycles/pixel in %d steps\n", DSD4_MTF_BINS);
+    fprintf(f, "# dsd4 scanner MTF (slanted edge): 0..1 cycles/pixel in %d steps\n", DSD4_MTF_BINS);
     fprintf(f, "dpi=%d\nsamples=%d\nfocus=%d\nmeasured_x=%d\nmeasured_y=%d\n", pr->dpi, pr->samples, pr->focus,
             pr->measured[0], pr->measured[1]);
     static const char *dn[2] = { "x", "y" }, *cn[3] = { "r", "g", "b" };

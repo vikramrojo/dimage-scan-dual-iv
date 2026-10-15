@@ -1,11 +1,11 @@
 /*
- * libdsdual4 - user-space driver for the Konica Minolta DiMAGE Scan Dual IV
+ * libdsd4 - user-space driver for the Konica Minolta DiMAGE Scan Dual IV
  * (USB 132b:000a, firmware product id "FS-V31").
  *
  * Reimplemented from the PowerPC Mac driver (MFSBaseLib2891, MFSIOUsb2891).
  */
-#ifndef DSDUAL4_H
-#define DSDUAL4_H
+#ifndef DSD4_H
+#define DSD4_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -314,7 +314,7 @@ int  dsd4_deblur_dng(const char *in, const char *out, int level, int tone, dsd4_
  * not the inverted picture. */
 int  dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, const void *icc, size_t icc_len);
 
-/* Diagnostics for multi-pass super-resolution ("dsdual4 research"): which =
+/* Diagnostics for multi-pass super-resolution ("dsd4 research"): which =
  * "nyquist", "focus", "jitter", "yres" or "all".  Scans strips of the
  * current/selected frame and writes a report; outdir (or NULL) receives
  * DNG crops. */
@@ -326,9 +326,13 @@ int  dsd4_research(dsd4 *s, const dsd4_scan_params *p, const char *which, const 
  * with.  Needs the calibration cache written by dsd4_initialize(). */
 int  dsd4_minolta_convert(const dsd4_image *in, dsd4_film film, const double in_exposure[3],
                           dsd4_image *out, dsd4_minolta_info *info);
-/* Read an uncompressed 8/16-bit gray/RGB TIFF (as written by dsdual4 or
+/* Read an uncompressed 8/16-bit gray/RGB TIFF (as written by dsd4 or
  * re-saved by Preview). */
 int  dsd4_read_tiff(const char *path, dsd4_image *img);
+/* path of a file in the settings and calibration folder,
+ * ~/Library/Application Support/dsd4 (the former dsdual4 folder is moved
+ * there on first use; DSD4_SUPPORT_DIR overrides) */
+int  dsd4_support_path(const char *name, char *out, size_t n);
 /* Read a DNG written by dsd4_write_dng (samples as stored: linear) */
 int  dsd4_read_dng(const char *path, dsd4_image *img);
 

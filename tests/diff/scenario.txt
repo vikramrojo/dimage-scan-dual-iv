@@ -1,5 +1,5 @@
 # Differential test scenario, executed identically against the original
-# PowerPC MFSBaseLib2891 (emulated) and against libdsdual4.
+# PowerPC MFSBaseLib2891 (emulated) and against libdsd4.
 #
 # SP name ulx uly width length pixels lines mode bits flags er eg eb xres yres focus mlines mscan msample aps final nonstd readlines chunklines
 INIT

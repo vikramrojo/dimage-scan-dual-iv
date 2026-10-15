@@ -261,7 +261,7 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
     add_rational(&d, 283, T_RATIONAL, 1, &dpi);
     add_short(&d, 284, 1, &one);
     add_short(&d, 296, 1, &two);
-    add_ascii(&d, 305, "dsdual4 (DiMAGE Scan Dual IV driver)");
+    add_ascii(&d, 305, "dsd4 (DiMAGE Scan Dual IV driver)");
     uint16_t sf[3] = { fl ? 3 : 1, fl ? 3 : 1, fl ? 3 : 1 };
     add_short(&d, 339, och, sf);
     entry_t *e = add(&d, 50706, T_BYTE, 4);
@@ -295,7 +295,7 @@ int dsd4_write_dng(const dsd4_image *img, const char *path, int float_bits, cons
          * DefaultBlackRender "none" turn both off in Preview/Photos and
          * Lightroom alike */
         static const float ident[4] = { 0, 0, 1, 1 };
-        add_ascii(&d, 50936, mino ? "dsdual4 Minolta film curve" : "dsdual4 inverted"); /* ProfileName */
+        add_ascii(&d, 50936, mino ? "dsd4 Minolta film curve" : "dsd4 inverted"); /* ProfileName */
         add_float(&d, 50940, 4, ident);  /* ProfileToneCurve */
         add_long(&d, 51110, 1);          /* DefaultBlackRender: none */
     }
@@ -490,7 +490,9 @@ static int load_dng(const char *path, dng_file *df, dsd4_image *im)
         case 50936: { /* ProfileName: this driver's finished positives */
             uint32_t off = cnt <= 4 ? (uint32_t)(e - d) + 8 : get32le(e + 8);
             if (off + cnt <= (uint32_t)len)
-                profiled = memmem(d + off, cnt, "dsdual4 Minolta", 15) || memmem(d + off, cnt, "dsdual4 inverted", 16);
+                /* also files written before the rename to dsd4 */
+                profiled = memmem(d + off, cnt, "dsd4 Minolta", 12) || memmem(d + off, cnt, "dsd4 inverted", 13) ||
+                           memmem(d + off, cnt, "dsdual4 Minolta", 15) || memmem(d + off, cnt, "dsdual4 inverted", 16);
             break;
         }
         }

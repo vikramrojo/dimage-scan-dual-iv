@@ -2,7 +2,7 @@
 #ifndef DSD4_SUPERRES_H
 #define DSD4_SUPERRES_H
 
-#include "dsdual4.h"
+#include "dsd4.h"
 
 typedef struct {
     int w, h;

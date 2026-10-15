@@ -14,15 +14,15 @@ VERSION   ?= 1.1.$(GIT_COUNT)
 LIB_SRC = src/avision.c src/avlib.c src/calib.c src/scanner.c src/image.c src/usb_macos.c src/sim.c src/escl.c src/minolta.c src/minolta_ae.c src/minolta_lut.c src/dng.c src/merge.c src/superres.c src/research.c src/deblur.c src/mtf.c src/imgops.c src/enhance.c src/profiles.c
 LIB_OBJ = $(LIB_SRC:src/%.c=build/%.o)
 
-all: build/libdsdual4.a build/dsdual4
+all: build/libdsd4.a build/dsd4
 
 build:
 	mkdir -p build
 
-build/%.o: src/%.c src/dsd4_internal.h src/transport.h src/escl.h src/minolta_ae.h src/minolta_lut.h src/superres.h src/imgops.h include/dsdual4.h | build
+build/%.o: src/%.c src/dsd4_internal.h src/transport.h src/escl.h src/minolta_ae.h src/minolta_lut.h src/superres.h src/imgops.h include/dsd4.h | build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/libdsdual4.a: $(LIB_OBJ)
+build/libdsd4.a: $(LIB_OBJ)
 	rm -f $@
 	libtool -static -o $@ $^ 2>/dev/null
 
@@ -32,15 +32,15 @@ build/version.h: FORCE | build
 	@echo '#define DSD4_COMMIT "$(GIT_SHA)$(GIT_DIRTY)"' >> $@.tmp
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 
-build/dsdual4: tools/dsdual4.c build/libdsdual4.a build/version.h
-	$(CC) $(CFLAGS) -Ibuild $< build/libdsdual4.a $(LDLIBS) -o $@
+build/dsd4: tools/dsd4.c build/libdsd4.a build/version.h
+	$(CC) $(CFLAGS) -Ibuild $< build/libdsd4.a $(LDLIBS) -o $@
 
 version:
 	@echo $(VERSION) $(GIT_SHA)$(GIT_DIRTY)
 
 FORCE:
 
-test: build/dsdual4
+test: build/dsd4
 	./tests/run_sim_tests.sh
 
 # needs: pip install unicorn; ORIGINAL_LIB=<extracted MFSBaseLib2891>
@@ -51,48 +51,52 @@ difftest:
 # FIRMWARE=path/to/DS_Dual4.BIN additionally installs the firmware image used
 # only by the opt-in --firmware-update.
 install: all
-	install -d $(PREFIX)/bin $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/share/dsdual4
-	install -m 755 build/dsdual4 $(PREFIX)/bin/
-	install -m 644 build/libdsdual4.a $(PREFIX)/lib/
-	install -m 644 include/dsdual4.h $(PREFIX)/include/
-	install -m 644 profiles/MLTF3200p.icc profiles/MLTF3200n.icc profiles/NOTICE $(PREFIX)/share/dsdual4/
-	install -m 755 packaging/uninstall.sh $(PREFIX)/share/dsdual4/
-	if [ -n "$(FIRMWARE)" ]; then install -m 644 "$(FIRMWARE)" $(PREFIX)/share/dsdual4/DS_Dual4.BIN; fi
+	install -d $(PREFIX)/bin $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/share/dsd4
+	install -m 755 build/dsd4 $(PREFIX)/bin/
+	install -m 644 build/libdsd4.a $(PREFIX)/lib/
+	install -m 644 include/dsd4.h $(PREFIX)/include/
+	install -m 644 profiles/MLTF3200p.icc profiles/MLTF3200n.icc profiles/NOTICE $(PREFIX)/share/dsd4/
+	install -m 755 packaging/uninstall.sh $(PREFIX)/share/dsd4/
+	if [ -n "$(FIRMWARE)" ]; then install -m 644 "$(FIRMWARE)" $(PREFIX)/share/dsd4/DS_Dual4.BIN; fi
 
 # Image Capture service for the current user only (the package installs it for everyone)
-AGENT = $(HOME)/Library/LaunchAgents/org.dsdual4.airscan.plist
+AGENT = $(HOME)/Library/LaunchAgents/org.dsd4.airscan.plist
+OLD_AGENT = $(HOME)/Library/LaunchAgents/org.dsdual4.airscan.plist
 install-agent: install
-	sed "s|@BIN@|$(PREFIX)/bin/dsdual4|" packaging/org.dsdual4.airscan.plist > $(AGENT)
 	launchctl bootout gui/$$(id -u)/org.dsdual4.airscan 2>/dev/null || true
+	rm -f $(OLD_AGENT)
+	sed "s|@BIN@|$(PREFIX)/bin/dsd4|" packaging/org.dsd4.airscan.plist > $(AGENT)
+	launchctl bootout gui/$$(id -u)/org.dsd4.airscan 2>/dev/null || true
 	launchctl bootstrap gui/$$(id -u) $(AGENT)
 
 uninstall-agent:
+	launchctl bootout gui/$$(id -u)/org.dsd4.airscan 2>/dev/null || true
 	launchctl bootout gui/$$(id -u)/org.dsdual4.airscan 2>/dev/null || true
-	rm -f $(AGENT)
+	rm -f $(AGENT) $(OLD_AGENT)
 
 # ---- installer package ------------------------------------------------------
-# make pkg       unsigned build/dsdual4-$(VERSION).pkg
+# make pkg       unsigned build/dsd4-$(VERSION).pkg
 # make release   signed + notarised package, tagged and published on GitHub.
 # Signing (optional for pkg, required for release):
 #   SIGN_APP="Developer ID Application: Name (TEAMID)"
 #   SIGN_INSTALLER="Developer ID Installer: Name (TEAMID)"
 #   NOTARY_PROFILE=<name given to xcrun notarytool store-credentials>
 PKGROOT = build/pkgroot
-PKG     = build/dsdual4-$(VERSION).pkg
+PKG     = build/dsd4-$(VERSION).pkg
 
 pkg: all
-	rm -rf $(PKGROOT) build/pkgres build/dsdual4-component.pkg $(PKG)
+	rm -rf $(PKGROOT) build/pkgres build/dsd4-component.pkg $(PKG)
 	$(MAKE) install PREFIX=$(CURDIR)/$(PKGROOT)/usr/local
 	@if [ -n "$(SIGN_APP)" ]; then \
-	    codesign --force --options runtime --timestamp --sign "$(SIGN_APP)" $(PKGROOT)/usr/local/bin/dsdual4; \
+	    codesign --force --options runtime --timestamp --sign "$(SIGN_APP)" $(PKGROOT)/usr/local/bin/dsd4; \
 	else echo "note: SIGN_APP not set, binary is ad-hoc signed"; fi
 	install -d $(PKGROOT)/Library/LaunchAgents
-	sed "s|@BIN@|/usr/local/bin/dsdual4|" packaging/org.dsdual4.airscan.plist > $(PKGROOT)/Library/LaunchAgents/org.dsdual4.airscan.plist
-	cat README.md > $(PKGROOT)/usr/local/share/dsdual4/README.md
-	cat LICENSE > $(PKGROOT)/usr/local/share/dsdual4/LICENSE
+	sed "s|@BIN@|/usr/local/bin/dsd4|" packaging/org.dsd4.airscan.plist > $(PKGROOT)/Library/LaunchAgents/org.dsd4.airscan.plist
+	cat README.md > $(PKGROOT)/usr/local/share/dsd4/README.md
+	cat LICENSE > $(PKGROOT)/usr/local/share/dsd4/LICENSE
 	xattr -cr $(PKGROOT)
-	COPYFILE_DISABLE=1 pkgbuild --root $(PKGROOT) --identifier org.dsdual4.driver --version $(VERSION) \
-	    --scripts packaging/scripts --install-location / build/dsdual4-component.pkg
+	COPYFILE_DISABLE=1 pkgbuild --root $(PKGROOT) --identifier org.dsd4.driver --version $(VERSION) \
+	    --scripts packaging/scripts --install-location / build/dsd4-component.pkg
 	mkdir -p build/pkgres
 	cp packaging/resources/*.html build/pkgres/
 	cat LICENSE > build/pkgres/LICENSE.txt
@@ -110,9 +114,9 @@ release:
 	@test -z "$(GIT_DIRTY)" || { echo "commit your changes first"; exit 1; }
 	$(MAKE) test
 	$(MAKE) pkg
-	git tag -a v$(VERSION) -m "dsdual4 $(VERSION)"
+	git tag -a v$(VERSION) -m "dsd4 $(VERSION)"
 	git push origin v$(VERSION)
-	gh release create v$(VERSION) $(PKG) --title "dsdual4 $(VERSION)" --generate-notes
+	gh release create v$(VERSION) $(PKG) --title "dsd4 $(VERSION)" --generate-notes
 
 clean:
 	rm -rf build

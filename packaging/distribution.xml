@@ -8,6 +8,6 @@
     <volume-check><allowed-os-versions><os-version min="11.0"/></allowed-os-versions></volume-check>
     <domains enable_localSystem="true"/>
     <choices-outline><line choice="default"/></choices-outline>
-    <choice id="default" title="dsdual4"><pkg-ref id="org.dsdual4.driver"/></choice>
-    <pkg-ref id="org.dsdual4.driver" version="@VERSION@">dsdual4-component.pkg</pkg-ref>
+    <choice id="default" title="dsd4"><pkg-ref id="org.dsd4.driver"/></choice>
+    <pkg-ref id="org.dsd4.driver" version="@VERSION@">dsd4-component.pkg</pkg-ref>
 </installer-gui-script>

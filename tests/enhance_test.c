@@ -6,7 +6,7 @@
  *   denoise low:  flat-area noise not above the input, colour noise down
  *   denoise high: flat-area noise down by at least 30 %
  *   nothing on:   the image is untouched; 4000 dpi: the size is x1.25 */
-#include "dsdual4.h"
+#include "dsd4.h"
 
 #include <math.h>
 #include <stdint.h>

@@ -1,5 +1,5 @@
 /*
- * "dsdual4 research": measurements that decide whether multi-pass
+ * "dsd4 research": measurements that decide whether multi-pass
  * super-resolution can add real detail on this scanner.
  *
  *   nyquist  is there detail above the noise near the 3200 dpi sampling limit?
@@ -422,7 +422,7 @@ int dsd4_research(dsd4 *s, const dsd4_scan_params *sp, const char *which, const 
         r.base.focus = best;
     }
     const int all = !strcmp(which, "all");
-    fprintf(report, "dsdual4 research: film type %d, focus %d\n", (int)r.base.film, r.base.focus);
+    fprintf(report, "dsd4 research: film type %d, focus %d\n", (int)r.base.film, r.base.focus);
     if ((all || !strcmp(which, "nyquist")) && (e = test_nyquist(&r))) return e;
     if ((all || !strcmp(which, "focus")) && (e = test_focus(&r))) return e;
     if ((all || !strcmp(which, "jitter")) && (e = test_jitter(&r))) return e;
@@ -479,7 +479,7 @@ int dsd4_research_mtf(dsd4 *s, const dsd4_scan_params *sp, const char *outdir, d
         if ((e = dsd4_select_frame(s, r.base.frame))) return e;
         r.base.frame = 0;
     }
-    fprintf(report, "dsdual4 research mtf: razor blade\n");
+    fprintf(report, "dsd4 research mtf: razor blade\n");
     /* 1. find the blade: the whole frame at 800 dpi */
     const int f0 = r.base.focus == DSD4_FOCUS_AUTO ? 0 : r.base.focus;
     dsd4_scan_params q = r.base;
@@ -624,7 +624,7 @@ int dsd4_research_grain(dsd4 *s, const dsd4_scan_params *sp, const char *outdir,
     rctx r = { s, *sp, report, outdir, cb, ud, -1, -1, -1, -1 };
     int e = prep(s, sp, &r);
     if (e) return e;
-    fprintf(report, "dsdual4 research grain: the scanner's MTF across, from film grain (focus %d)\n", r.base.focus);
+    fprintf(report, "dsd4 research grain: the scanner's MTF across, from film grain (focus %d)\n", r.base.focus);
     if (!np || !np->valid) fprintf(report, "  (no sensor noise profile: grain taken as is; run research noise first)\n");
     const int ms = r.base.multi_sample > 1 ? r.base.multi_sample : 4;
     dsd4_image im[2];
@@ -744,7 +744,7 @@ int dsd4_research_noise(dsd4 *s, const dsd4_scan_params *sp, const char *outdir,
     rctx r = { s, *sp, report, outdir, cb, ud, -1, -1, -1, -1 };
     int e = prep(s, sp, &r);
     if (e) return e;
-    fprintf(report, "dsdual4 research noise: sensor noise from 8 reads of each pixel\n");
+    fprintf(report, "dsd4 research noise: sensor noise from 8 reads of each pixel\n");
     enum { W = 1024, H = 256, S = 8, NX = 32 };
     double std[3];
     dsd4_film_default_exposure(r.base.film, std);
@@ -841,7 +841,7 @@ int dsd4_noise_write(const dsd4_noise_profile *np, const char *path)
 {
     FILE *f = fopen(path, "w");
     if (!f) return DSD4_ERR_IO;
-    fprintf(f, "# dsdual4 sensor noise: one read's variance at raw signal levels; spectrum 0..0.5 cycles/px\n");
+    fprintf(f, "# dsd4 sensor noise: one read's variance at raw signal levels; spectrum 0..0.5 cycles/px\n");
     fprintf(f, "levels=%d\n", np->levels);
     for (int c = 0; c < 3; c++) {
         fprintf(f, "mean_%c=", "rgb"[c]);
