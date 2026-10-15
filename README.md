@@ -1,4 +1,4 @@
-# dsdual4: DiMAGE Scan Dual IV driver for modern macOS
+# dsd4: DiMAGE Scan Dual IV driver for modern macOS
 
 A native driver for the **Konica Minolta DiMAGE Scan Dual IV** film scanner
 (USB `132b:000a`). The official software only runs on PowerPC Macs. This
@@ -7,14 +7,14 @@ in user space. There is no kernel extension.
 
 * **Image Capture and Preview**: the scanner appears there while it is
   plugged in.
-* **`dsdual4`**: an interactive Terminal menu, plus commands for scripting.
-* **`libdsdual4`**: a C library (`include/dsdual4.h`).
+* **`dsd4`**: an interactive Terminal menu, plus commands for scripting.
+* **`libdsd4`**: a C library (`include/dsd4.h`).
 
 ## Installation
 
 ### Simple
 
-1. Download `dsdual4-<version>.pkg` from
+1. Download `dsd4-<version>.pkg` from
    [Releases](https://github.com/vikramrojo/minolta-scan-dual-iv/releases/latest).
 2. Open it and follow the installer.
 3. Connect and power on the scanner. Insert a film holder and close the front
@@ -23,22 +23,22 @@ in user space. There is no kernel extension.
    choose **DiMAGE Scan Dual IV**. Set the film type and negative handling at
    <http://localhost:8090/>.
 
-For more control, type `dsdual4` in Terminal to open the menu.
+For more control, type `dsd4` in Terminal to open the menu.
 
-* **Stop or start the background service:** `dsdual4 service stop|start|status`.
-* **Uninstall:** `sudo /usr/local/share/dsdual4/uninstall.sh`.
+* **Stop or start the background service:** `dsd4 service stop|start|status`.
+* **Uninstall:** `sudo /usr/local/share/dsd4/uninstall.sh`.
 
 ### Build from source
 
 ```sh
 xcode-select --install                 # once
 make && make test                      # universal binary in build/
-sudo make install                      # /usr/local/{bin,lib,include,share/dsdual4}
+sudo make install                      # /usr/local/{bin,lib,include,share/dsd4}
 make install-agent                     # optional: Image Capture service for this user
-make pkg                               # optional: build/dsdual4-<version>.pkg
+make pkg                               # optional: build/dsd4-<version>.pkg
 ```
 
-The version number is `1.1.<commit count>`; `dsdual4 --version` shows it.
+The version number is `1.1.<commit count>`; `dsd4 --version` shows it.
 
 To make a signed release, set `SIGN_APP`, `SIGN_INSTALLER` (your Developer ID
 certificate names) and `NOTARY_PROFILE` (from `xcrun notarytool
@@ -47,7 +47,7 @@ tags and publishes the package to GitHub Releases.
 
 ## Usage
 
-Running `dsdual4` with no arguments opens a guided menu:
+Running `dsd4` with no arguments opens a guided menu:
 
 * Options stay greyed out until they can be used.
 * `h` shows instructions.
@@ -57,19 +57,19 @@ Running `dsdual4` with no arguments opens a guided menu:
 Commands:
 
 ```sh
-dsdual4 init                                 # warm up lamp + calibrate (first time ~1-2 min)
-dsdual4 preview -o p.tiff                    # quick preview of the current frame
-dsdual4 scan --frame 3 --dpi 3200 -o s.tiff  # 16-bit TIFF
-dsdual4 scan --film nega --minolta -o n.tiff # negative, original Minolta processing
-dsdual4 scan --format dng --samples 8 -o r.dng   # raw DNG, 8x multi-sampled
-dsdual4 scan --format dng --hdr -o h.dng     # raw DNG, two exposures merged
-dsdual4 scan --film nega --minolta --format dng -o m.dng  # Minolta positive as a DNG
-dsdual4 scan --film nega --invert --format dng -o p.dng   # simple-invert positive DNG
-dsdual4 scan-all -o roll                     # roll-1.tiff ... roll-6.tiff
-dsdual4 scan-all --frames 4 -o roll          # a strip of 4: roll-1 ... roll-4
-dsdual4 scan --experimental 4000dpi,denoise-low -o s.tiff  # experimental, see below
-dsdual4 convert raw.tiff --film bw-nega -o out.tiff   # process an existing raw negative
-dsdual4 eject | home | reset | autofocus | info
+dsd4 init                                 # warm up lamp + calibrate (first time ~1-2 min)
+dsd4 preview -o p.tiff                    # quick preview of the current frame
+dsd4 scan --frame 3 --dpi 3200 -o s.tiff  # 16-bit TIFF
+dsd4 scan --film nega --minolta -o n.tiff # negative, original Minolta processing
+dsd4 scan --format dng --samples 8 -o r.dng   # raw DNG, 8x multi-sampled
+dsd4 scan --format dng --hdr -o h.dng     # raw DNG, two exposures merged
+dsd4 scan --film nega --minolta --format dng -o m.dng  # Minolta positive as a DNG
+dsd4 scan --film nega --invert --format dng -o p.dng   # simple-invert positive DNG
+dsd4 scan-all -o roll                     # roll-1.tiff ... roll-6.tiff
+dsd4 scan-all --frames 4 -o roll          # a strip of 4: roll-1 ... roll-4
+dsd4 scan --experimental 4000dpi,denoise-low -o s.tiff  # experimental, see below
+dsd4 convert raw.tiff --film bw-nega -o out.tiff   # process an existing raw negative
+dsd4 eject | home | reset | autofocus | info
 ```
 
 * **Options:** `--film posi|nega|bw-posi|bw-nega`, `--dpi 50..3200`,
@@ -77,10 +77,10 @@ dsdual4 eject | home | reset | autofocus | info
   `--invert`, `--minolta`, `--format tiff|dng`, `--hdr[=ev]`,
   `--af fast|classic`, `--flip-x`, `--rotate`.
 * **Diagnostics:** `-v` to `-vvvv` for progress, a protocol trace or hex dumps.
-* **`dsdual4 --help`** lists everything.
+* **`dsd4 --help`** lists everything.
 
 **If you see "holder position error":** close the front door and push the
-holder fully in, then run `dsdual4 reset`.
+holder fully in, then run `dsd4 reset`.
 
 ## Colour and negatives
 
@@ -151,16 +151,16 @@ it gains more than anything else, provided the grain is not boosted with it.
    typical Dual IV, measured on one unit, and sharpen at 70 % strength so as
    not to over-correct another unit's optics. Calibrating gives the full,
    exact correction for your own scanner:
-   * `dsdual4 research mtf`: tape a razor blade into a slide mount, its edge
+   * `dsd4 research mtf`: tape a razor blade into a slide mount, its edge
      turned 2–20° from the mount's sides, and insert it as a slide. It finds
      the blade and its best focus and measures the MTF along the carriage
      (ISO 12233 slanted edge), single and multi-sampled.
-   * `dsdual4 research grain`: a film frame with flat areas (sky, blank
+   * `dsd4 research grain`: a film frame with flat areas (sky, blank
      film). Grain is the same in every direction, so its spectrum across
      against along gives the MTF across, which a blade in a mount can't show.
-   * `dsdual4 research noise`: blank film or an empty mount. The sensor's
+   * `dsd4 research noise`: blank film or an empty mount. The sensor's
      noise is measured from repeated reads of each pixel.
-   * `dsdual4 mtf scan.dng` measures any scan of the blade, for comparing.
+   * `dsd4 mtf scan.dng` measures any scan of the blade, for comparing.
 2. **Scan with `--experimental`** (or Device & output settings → e):
    * `sharpen` undoes the measured blur, on brightness only. It is boosted
      only where the picture is stronger than the sensor's noise, mostly at
@@ -182,7 +182,7 @@ Ghidra and the PEF/Mach-O tools in `docs/re-tools/`. The recovered USB
 protocol is documented in `docs/PROTOCOL.md`.
 
 * **`make test`:** 44 end-to-end tests against a built-in scanner simulator
-  (`dsdual4 --sim`).
+  (`dsd4 --sim`).
 * **`make difftest`:** runs the original PowerPC code in the Unicorn emulator,
   side by side with the port.
   * All 327 scanner commands and 108 image reads are identical.

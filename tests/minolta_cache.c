@@ -1,7 +1,7 @@
 /* A Minolta preview followed by a Minolta scan of the same frame must reuse
  * the preview's auto-exposure (no second prescan) and produce the same AE
  * exposure as a scan without a preview. */
-#include "dsdual4.h"
+#include "dsd4.h"
 #include "../src/transport.h"
 
 #include <stdio.h>

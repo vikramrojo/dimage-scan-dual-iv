@@ -2,7 +2,7 @@
 #ifndef DSD4_IMGOPS_H
 #define DSD4_IMGOPS_H
 
-#include "dsdual4.h"
+#include "dsd4.h"
 
 #include <dispatch/dispatch.h>
 

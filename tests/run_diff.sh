@@ -1,6 +1,6 @@
 #!/bin/bash
 # Differential test: run scenario.txt against the ORIGINAL PowerPC library
-# (emulated with Unicorn) and against libdsdual4, and require identical
+# (emulated with Unicorn) and against libdsd4, and require identical
 # command/data traces.
 #   ORIGINAL_LIB=/path/to/MFSBaseLib2891 DSD4_FIRMWARE=/path/to/DS_Dual4.BIN tests/run_diff.sh
 set -eu
@@ -10,8 +10,8 @@ FW=$(abspath "${DSD4_FIRMWARE:-}")
 PY=${PYTHON:-python3}
 cd "$(dirname "$0")/.."
 "$PY" -c "import unicorn" 2>/dev/null || { echo "skipped: pip install unicorn"; exit 0; }
-make -s build/libdsdual4.a
-clang -O1 -ffp-contract=off -Iinclude -Isrc tests/diff/port_runner.c build/libdsdual4.a -framework IOKit -framework CoreFoundation -framework ApplicationServices -framework ImageIO -framework Accelerate -o build/port_runner
+make -s build/libdsd4.a
+clang -O1 -ffp-contract=off -Iinclude -Isrc tests/diff/port_runner.c build/libdsd4.a -framework IOKit -framework CoreFoundation -framework ApplicationServices -framework ImageIO -framework Accelerate -o build/port_runner
 clang -shared -O1 -Isrc src/sim.c tests/diff/simlib.c -o build/libsimx.dylib
 export DSD4_SIM_FW_PENDING=1 DSD4_TIME_SCALE=0.001
 T=$(mktemp -d)

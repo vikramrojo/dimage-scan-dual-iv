@@ -2,7 +2,7 @@
 #ifndef DSD4_ESCL_H
 #define DSD4_ESCL_H
 
-#include "dsdual4.h"
+#include "dsd4.h"
 
 typedef void (*dsd4_escl_log_fn)(const char *msg);
 

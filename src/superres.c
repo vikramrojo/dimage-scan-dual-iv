@@ -2,7 +2,7 @@
  * Sub-pixel registration between scan passes: FFT helpers, phase
  * correlation and a Lucas-Kanade refinement on image tiles, and a fit of
  * the displacement model dx = a + m*(x - xc), dy = b + m*(y - yc).
- * Used by "dsdual4 research" to measure what multi-pass super-resolution
+ * Used by "dsd4 research" to measure what multi-pass super-resolution
  * could gain on this scanner.
  */
 #include "dsd4_internal.h"

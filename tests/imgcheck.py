@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measurements on dsdual4's TIFF/DNG output for the simulator tests
+"""Measurements on dsd4's TIFF/DNG output for the simulator tests
 (standard library only).
 
   imgcheck.py neutral IN.tiff            mean |R-G|, |B-G| (fraction of full scale)

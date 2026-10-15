@@ -1,5 +1,5 @@
 // Uses Apple's ImageCaptureCore (the framework behind Image Capture and
-// Preview) to discover the dsdual4 AirScan bridge and run a scan through it.
+// Preview) to discover the dsd4 AirScan bridge and run a scan through it.
 // usage: ica_probe [seconds] [outdir]
 import Foundation
 import ImageCaptureCore

@@ -180,8 +180,7 @@ int avl_reset_to_initial_state(dsd4 *s, uint8_t mode)
  * them when the scanner reports it is already calibrated. */
 static void cache_path(char *out, size_t n, const char *name)
 {
-    const char *home = getenv("HOME");
-    snprintf(out, n, "%s/Library/Application Support/dsdual4/%s", home ? home : ".", name);
+    dsd4_support_path(name, out, n);
 }
 
 static int no_cache(void)

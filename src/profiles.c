@@ -1,15 +1,15 @@
 /*
  * Built-in profiles: a typical DiMAGE Scan Dual IV, measured on one unit
- * (2026-10-14) with dsdual4 research mtf (razor blade, along the carriage),
+ * (2026-10-14) with dsd4 research mtf (razor blade, along the carriage),
  * research grain (film grain, across) and research noise (blank film).
  * Used when a scanner has not been calibrated itself; sharpening then runs
  * at reduced strength, as other units' optics differ a little.
- * Regenerate from ~/Library/Application Support/dsdual4/scanner-*.conf.
+ * Regenerate from ~/Library/Application Support/dsd4/scanner-*.conf.
  */
 #include "dsd4_internal.h"
 
 const char dsd4i_default_mtf_1x[] =
-    "# dsdual4 scanner MTF (slanted edge): 0..1 cycles/pixel in 65 steps\n"
+    "# dsd4 scanner MTF (slanted edge): 0..1 cycles/pixel in 65 steps\n"
     "dpi=3200\n"
     "samples=1\n"
     "focus=0\n"
@@ -29,7 +29,7 @@ const char dsd4i_default_mtf_1x[] =
     "y_b=1.00000 0.99456 0.97959 0.95844 0.93441 0.90927 0.88324 0.85627 0.82870 0.80085 0.77270 0.74432 0.71618 0.68871 0.66180 0.63518 0.60890 0.58316 0.55785 0.53283 0.50835 0.48483 0.46225 0.44028 0.41871 0.39763 0.37708 0.35708 0.33780 0.31938 0.30170 0.28461 0.26813 0.25233 0.23705 0.22218 0.20809 0.19523 0.18347 0.17217 0.16099 0.15012 0.13991 0.13049 0.12193 0.11404 0.10628 0.09816 0.08999 0.08265 0.07639 0.07048 0.06439 0.05871 0.05422 0.05069 0.04714 0.04315 0.03933 0.03629 0.03397 0.03198 0.02999 0.02788 0.02587\n";
 
 const char dsd4i_default_mtf_multi[] =
-    "# dsdual4 scanner MTF (slanted edge): 0..1 cycles/pixel in 65 steps\n"
+    "# dsd4 scanner MTF (slanted edge): 0..1 cycles/pixel in 65 steps\n"
     "dpi=3200\n"
     "samples=2\n"
     "focus=0\n"
@@ -49,7 +49,7 @@ const char dsd4i_default_mtf_multi[] =
     "y_b=1.00000 0.99413 0.97804 0.95526 0.92915 0.90151 0.87278 0.84304 0.81262 0.78185 0.75086 0.71978 0.68888 0.65843 0.62847 0.59894 0.56984 0.54127 0.51334 0.48615 0.45983 0.43436 0.40958 0.38539 0.36200 0.33962 0.31825 0.29773 0.27795 0.25888 0.24052 0.22292 0.20634 0.19100 0.17677 0.16334 0.15050 0.13828 0.12663 0.11548 0.10505 0.09573 0.08758 0.08007 0.07271 0.06552 0.05881 0.05262 0.04674 0.04117 0.03627 0.03230 0.02914 0.02646 0.02398 0.02161 0.01941 0.01756 0.01613 0.01488 0.01346 0.01195 0.01099 0.01115 0.01207\n";
 
 const char dsd4i_default_noise[] =
-    "# dsdual4 sensor noise: one read's variance at raw signal levels; spectrum 0..0.5 cycles/px\n"
+    "# dsd4 sensor noise: one read's variance at raw signal levels; spectrum 0..0.5 cycles/px\n"
     "levels=6\n"
     "mean_r=0.927632 0.475039 0.457152 0.457028 0.456953 0.456881\n"
     "var_r=0.000358412 0.000203062 0.00018726 0.000188029 0.000188142 0.0001855\n"

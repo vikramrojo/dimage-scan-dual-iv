@@ -1,7 +1,7 @@
 /*
- * dsdual4 - command line front end for the DiMAGE Scan Dual IV driver.
+ * dsd4 - command line front end for the DiMAGE Scan Dual IV driver.
  */
-#include "dsdual4.h"
+#include "dsd4.h"
 #include "../src/transport.h"
 #include "../src/escl.h"
 #include "version.h"
@@ -54,26 +54,19 @@ static const uint8_t *linear_icc(int gray, size_t *len) { return system_icc(gray
  * gray (Generic Gray Gamma 2.2), so TIFF and DNG are read the same way */
 static const uint8_t *gray22_icc(size_t *len) { return system_icc(2, len); }
 
-/* ~/Library/Application Support/dsdual4/<name> (DSD4_SUPPORT_DIR overrides
+/* ~/Library/Application Support/dsd4/<name> (DSD4_SUPPORT_DIR overrides
  * the folder: tests), creating the folder */
 static const char *support_path(const char *name, char *b, size_t n)
 {
-    const char *dir = getenv("DSD4_SUPPORT_DIR"), *home = getenv("HOME");
-    char d[PATH_MAX];
-    if (dir) snprintf(d, sizeof d, "%s", dir);
-    else snprintf(d, sizeof d, "%s/Library/Application Support/dsdual4", home ? home : ".");
-    for (char *q = d + 1; *q; q++)
-        if (*q == '/') { *q = 0; mkdir(d, 0755); *q = '/'; }
-    mkdir(d, 0755);
-    snprintf(b, n, "%s/%s", d, name);
+    dsd4_support_path(name, b, n);
     return b;
 }
 
 static void usage(void)
 {
     fprintf(stderr,
-"usage: dsdual4                      interactive menu with instructions\n"
-"       dsdual4 [global options] <command> [command options]\n"
+"usage: dsd4                      interactive menu with instructions\n"
+"       dsd4 [global options] <command> [command options]\n"
 "\n"
 "commands:\n"
 "  info                      scanner identification and capabilities\n"
@@ -194,21 +187,22 @@ static const char *find_firmware(const char *argv0)
         "DS_Dual4.BIN",
         "firmware/DS_Dual4.BIN",
         "../DS_Dual4_extracted/DS Dual4/Firmware/DS_Dual4.BIN",
-        "/usr/local/share/dsdual4/DS_Dual4.BIN",
-        "/opt/homebrew/share/dsdual4/DS_Dual4.BIN",
+        "/usr/local/share/dsd4/DS_Dual4.BIN",
+        "/opt/homebrew/share/dsd4/DS_Dual4.BIN",
+        "/usr/local/share/dsdual4/DS_Dual4.BIN", /* installed before the rename to dsd4 */
     };
     for (size_t i = 0; i < sizeof cands / sizeof *cands; i++)
         if (access(cands[i], R_OK) == 0) return cands[i];
     const char *slash = strrchr(argv0, '/');
     if (slash) {
-        snprintf(buf, sizeof buf, "%.*s/../share/dsdual4/DS_Dual4.BIN", (int)(slash - argv0), argv0);
+        snprintf(buf, sizeof buf, "%.*s/../share/dsd4/DS_Dual4.BIN", (int)(slash - argv0), argv0);
         if (access(buf, R_OK) == 0) return buf;
     }
     return NULL;
 }
 
 /* Konica Minolta's input profile for linear positive scans, read from the
- * user's copy of the original software (not distributed with dsdual4). */
+ * user's copy of the original software (not distributed with dsd4). */
 static void load_profile(const char *argv0, const char *explicit_path)
 {
     char buf[PATH_MAX], buf2[PATH_MAX];
@@ -220,14 +214,15 @@ static void load_profile(const char *argv0, const char *explicit_path)
         if (env) cands[n++] = env;
         cands[n++] = "MLTF3200p.icc";
         cands[n++] = "../DS_Dual4_extracted/DS Dual4/Profile/MLTF3200p.icc";
-        cands[n++] = "/usr/local/share/dsdual4/MLTF3200p.icc";
-        cands[n++] = "/opt/homebrew/share/dsdual4/MLTF3200p.icc";
+        cands[n++] = "/usr/local/share/dsd4/MLTF3200p.icc";
+        cands[n++] = "/opt/homebrew/share/dsd4/MLTF3200p.icc";
+        cands[n++] = "/usr/local/share/dsdual4/MLTF3200p.icc"; /* before the rename to dsd4 */
         const char *slash = strrchr(argv0, '/');
         if (slash) {
-            snprintf(buf, sizeof buf, "%.*s/../share/dsdual4/MLTF3200p.icc", (int)(slash - argv0), argv0);
+            snprintf(buf, sizeof buf, "%.*s/../share/dsd4/MLTF3200p.icc", (int)(slash - argv0), argv0);
             cands[n++] = buf;
             snprintf(buf2, sizeof buf2, "%.*s/../profiles/MLTF3200p.icc", (int)(slash - argv0), argv0);
-            cands[n++] = buf2; /* source tree: build/dsdual4 */
+            cands[n++] = buf2; /* source tree: build/dsd4 */
         }
     }
     for (int i = 0; i < n; i++) {
@@ -239,7 +234,7 @@ static void load_profile(const char *argv0, const char *explicit_path)
         fseek(f, 0, SEEK_SET);
         if (len < 132 || len > (1 << 20) || fread(hdr, 1, 132, f) != 132 || memcmp(hdr + 36, "acsp", 4)) {
             fclose(f);
-            if (explicit_path) fprintf(stderr, "dsdual4: %s is not an ICC profile\n", cands[i]);
+            if (explicit_path) fprintf(stderr, "dsd4: %s is not an ICC profile\n", cands[i]);
             continue;
         }
         g_icc = malloc((size_t)len);
@@ -274,7 +269,7 @@ static void load_profile(const char *argv0, const char *explicit_path)
             return;
         }
     }
-    if (explicit_path) fprintf(stderr, "dsdual4: cannot read profile %s\n", explicit_path);
+    if (explicit_path) fprintf(stderr, "dsd4: cannot read profile %s\n", explicit_path);
 }
 
 static int parse_film(const char *s, dsd4_film *f)
@@ -293,19 +288,19 @@ static int check(int r, dsd4 *s, const char *what)
     done_progress();
     int code = dsd4_last_error(s);
     if (r == DSD4_ERR_SCANNER && (code == 0x67 || code == 0x68 || code == 0x69 || code == 0xd1)) {
-        fprintf(stderr, "dsdual4: %s: the scanner reports a film holder problem (code 0x%02x: %s).\n"
+        fprintf(stderr, "dsd4: %s: the scanner reports a film holder problem (code 0x%02x: %s).\n"
                 "  Check that the front door is closed and no holder is half inserted (push it\n"
                 "  in until the scanner grabs it, or pull it out completely), then retry.\n"
                 "  If it persists, switch the scanner off and on, wait for the light to stop\n"
-                "  blinking, and run init again ('dsdual4 reset' may also help).\n",
+                "  blinking, and run init again ('dsd4 reset' may also help).\n",
                 what, code, dsd4_scanner_error_text(code));
         return 1;
     }
     if (r == DSD4_ERR_SCANNER || r == DSD4_ERR_IO)
-        fprintf(stderr, "dsdual4: %s: %s (scanner code 0x%02x: %s)\n", what, dsd4_strerror(r),
+        fprintf(stderr, "dsd4: %s: %s (scanner code 0x%02x: %s)\n", what, dsd4_strerror(r),
                 dsd4_last_error(s), dsd4_scanner_error_text(dsd4_last_error(s)));
     else
-        fprintf(stderr, "dsdual4: %s: %s\n", what, dsd4_strerror(r));
+        fprintf(stderr, "dsd4: %s: %s\n", what, dsd4_strerror(r));
     return 1;
 }
 
@@ -446,7 +441,7 @@ static int experimental_params(const scan_opts *o, const dsd4_scan_params *p, ds
             ep->strength = 1;
         else if (!dsd4_mtf_default(multi, mtf)) { ep->strength = 0.7; g_x_typical |= 1; }
         if (mtf->valid && p->dpi != mtf->dpi)
-            fprintf(stderr, "dsdual4: experimental sharpen works at %d dpi only (not sharpened)\n", mtf->dpi);
+            fprintf(stderr, "dsd4: experimental sharpen works at %d dpi only (not sharpened)\n", mtf->dpi);
         else if (mtf->valid) { ep->sharpen = 1; ep->mtf = mtf; }
     }
     if (o->x_denoise) {
@@ -456,7 +451,7 @@ static int experimental_params(const scan_opts *o, const dsd4_scan_params *p, ds
     }
     if (o->x_4000) {
         if (p->dpi == 3200) ep->target_dpi = 4000;
-        else fprintf(stderr, "dsdual4: experimental 4000dpi needs a 3200 dpi scan (kept at %d dpi)\n", p->dpi);
+        else fprintf(stderr, "dsd4: experimental 4000dpi needs a 3200 dpi scan (kept at %d dpi)\n", p->dpi);
     }
     ep->samples = p->multi_sample;
     ep->hdr = o->hdr_ev > 0;
@@ -579,7 +574,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
     const int negative = p.film == DSD4_FILM_NEGATIVE_COLOR || p.film == DSD4_FILM_NEGATIVE_BW;
     const int dng = o->dng && !p.preview;
     if (o->hdr_ev > 0 && !dng) {
-        fprintf(stderr, "dsdual4: HDR needs raw output (--format dng)\n");
+        fprintf(stderr, "dsd4: HDR needs raw output (--format dng)\n");
         return 1;
     }
     /* DNG is the scanner's raw data: no curves or display conversion, and
@@ -619,7 +614,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         on_progress(NULL, "experimental processing", -1);
         r = dsd4_enhance(&im, &xp, &ei);
         done_progress();
-        if (r) { fprintf(stderr, "dsdual4: experimental processing failed (%d)\n", r); dsd4_image_free(&im); return 1; }
+        if (r) { fprintf(stderr, "dsd4: experimental processing failed (%d)\n", r); dsd4_image_free(&im); return 1; }
         report_experimental(&xp, &ei);
         if (x8) to_8bit(&im);
     }
@@ -637,7 +632,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
         on_progress(NULL, "deblurring", -1);
         r = dsd4_deblur(&im, o->deblur, tone, &di);
         done_progress();
-        if (r) { fprintf(stderr, "dsdual4: deblur failed (%d)\n", r); dsd4_image_free(&im); return 1; }
+        if (r) { fprintf(stderr, "dsd4: deblur failed (%d)\n", r); dsd4_image_free(&im); return 1; }
         if (g_verbose >= 1) report_deblur("deblur", &di);
     }
     if (o->display && minolta && im.bits == 16) {
@@ -677,7 +672,7 @@ static int do_scan(dsd4 *s, scan_opts *o, const char *path)
                              dng_n ? g_icc_n : g_icc, dng_n ? g_icc_n_len : g_icc_len)
             : dsd4_write_tiff_icc(&im, path, icc, icc_len);
     if (r != DSD4_OK) {
-        fprintf(stderr, "dsdual4: cannot write %s\n", path);
+        fprintf(stderr, "dsd4: cannot write %s\n", path);
         dsd4_image_free(&im);
         return 1;
     }
@@ -750,9 +745,9 @@ static void menu_help(void)
 "  16-bit TIFFs for editing: they look dark until you apply a curve. Choose\n"
 "  \"display-ready\" in Settings for files that look right straight away.\n"
 "  If an image is mirrored, turn on \"flip horizontally\" in Settings.\n\n"
-"  The same functions are available as commands, e.g. dsdual4 scan --frame 2\n"
-"  -o out.tiff (see dsdual4 --help). Image Capture / Preview can also scan\n"
-"  directly while \"dsdual4 serve\" is running.\n\n", C("1"), C("0"));
+"  The same functions are available as commands, e.g. dsd4 scan --frame 2\n"
+"  -o out.tiff (see dsd4 --help). Image Capture / Preview can also scan\n"
+"  directly while \"dsd4 serve\" is running.\n\n", C("1"), C("0"));
 }
 
 static const char *film_name(dsd4_film f)
@@ -967,9 +962,9 @@ static void device_settings(scan_opts *c, int *display, int *open_after, int *us
         case 'e':
             printf("    Experimental, after Norman Koren's film-scanner MTF studies:\n"
                    "    sharpen   undo the scanner's own blur (a typical Dual IV's, at 70 %%,\n"
-                   "              or yours: 'dsdual4 research mtf'); grain is not boosted\n"
+                   "              or yours: 'dsd4 research mtf'); grain is not boosted\n"
                    "    denoise   reduce sensor and colour noise (low), or also grain (high),\n"
-                   "              profiled per scan; sensor: typical, or 'dsdual4 research noise'\n"
+                   "              profiled per scan; sensor: typical, or 'dsd4 research noise'\n"
                    "    4000 dpi  3200 dpi scans sharpened and resampled to 4000 dpi\n");
             c->x_sharpen = ask_int("    Sharpen: 1 = on, 0 = off", c->x_sharpen, 0, 1);
             c->x_denoise = ask_int("    Denoise: 0 off, 1 low, 2 high", c->x_denoise, 0, 2);
@@ -1015,7 +1010,7 @@ static void device_settings(scan_opts *c, int *display, int *open_after, int *us
     }
 }
 
-/* menu settings persist in ~/Library/Application Support/dsdual4/menu.conf */
+/* menu settings persist in ~/Library/Application Support/dsd4/menu.conf */
 typedef struct {
     scan_opts *cfg;
     int *neg_mode, *display, *open_after, *use_profile;
@@ -1024,11 +1019,7 @@ typedef struct {
     size_t outlen;
 } menu_state;
 
-static void settings_path(char *b, size_t n)
-{
-    const char *home = getenv("HOME");
-    snprintf(b, n, "%s/Library/Application Support/dsdual4/menu.conf", home ? home : ".");
-}
+static void settings_path(char *b, size_t n) { support_path("menu.conf", b, n); }
 
 static void save_settings(const menu_state *m)
 {
@@ -1096,7 +1087,7 @@ static int run_menu(dsd4 *s, int fw_check)
     g_color = isatty(1);
     char outdir[PATH_MAX];
     const char *home = getenv("HOME");
-    snprintf(outdir, sizeof outdir, "%s/Pictures/dsdual4", home ? home : ".");
+    snprintf(outdir, sizeof outdir, "%s/Pictures/dsd4", home ? home : ".");
     scan_opts cfg = { 0 };
     dsd4_default_params(&cfg.p);
     cfg.p.dpi = 3200;
@@ -1344,7 +1335,7 @@ static int run_menu(dsd4 *s, int fw_check)
     }
 }
 
-/* dsdual4 convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f|r,g,b] */
+/* dsd4 convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f|r,g,b] */
 static void serve_on_open(dsd4 *s, void *ud)
 {
     (void)ud;
@@ -1372,7 +1363,7 @@ static int cmd_serve(dsd4 *s, int fw_check, int argc, char **argv)
     return dsd4_escl_serve(s, &eo) ? 1 : 0;
 }
 
-#define AGENT_LABEL "org.dsdual4.airscan"
+#define AGENT_LABEL "org.dsd4.airscan"
 
 static int launchctl(const char *verb, const char *arg, int quiet)
 {
@@ -1393,11 +1384,11 @@ static int cmd_service(int argc, char **argv)
     int loaded = launchctl("print", svc, 1) == 0;
     if (!strcmp(op, "status")) {
         printf("Image Capture service: %s\n", loaded ? "running" : "stopped");
-        if (loaded) printf("  settings page: http://localhost:8090/\n  log: ~/Library/Logs/dsdual4.log\n");
+        if (loaded) printf("  settings page: http://localhost:8090/\n  log: ~/Library/Logs/dsd4.log\n");
         return loaded ? 0 : 3;
     }
     if (!strcmp(op, "start")) {
-        if (access(plist, R_OK)) { fprintf(stderr, "dsdual4: service not installed (%s)\n", plist); return 1; }
+        if (access(plist, R_OK)) { fprintf(stderr, "dsd4: service not installed (%s)\n", plist); return 1; }
         launchctl("enable", svc, 1);
         char a[PATH_MAX + 80];
         snprintf(a, sizeof a, "%s '%s'", dom, plist);
@@ -1408,7 +1399,7 @@ static int cmd_service(int argc, char **argv)
     if (!strcmp(op, "stop")) {
         if (loaded && launchctl("bootout", svc, 0)) return 1;
         launchctl("disable", svc, 1);
-        printf("Image Capture service stopped (run \"dsdual4 service start\" to turn it back on)\n");
+        printf("Image Capture service stopped (run \"dsd4 service start\" to turn it back on)\n");
         return 0;
     }
     usage();
@@ -1427,12 +1418,12 @@ static int cmd_mtf(int argc, char **argv)
 {
     if (argc != 2 || argv[1][0] == '-') { usage(); return 2; }
     dsd4_image im;
-    if (read_scan(argv[1], &im)) { fprintf(stderr, "dsdual4: cannot read %s (a dsdual4 TIFF or DNG)\n", argv[1]); return 1; }
+    if (read_scan(argv[1], &im)) { fprintf(stderr, "dsd4: cannot read %s (a dsd4 TIFF or DNG)\n", argv[1]); return 1; }
     printf("%s: %dx%d, %d dpi\n", argv[1], im.width, im.height, im.dpi);
     dsd4_mtf_profile pr;
     int r = dsd4_measure_edge_mtf(&im, &pr, stdout);
     dsd4_image_free(&im);
-    if (r) { fprintf(stderr, "dsdual4: no usable slanted edge in %s\n", argv[1]); return 1; }
+    if (r) { fprintf(stderr, "dsd4: no usable slanted edge in %s\n", argv[1]); return 1; }
     return 0;
 }
 
@@ -1466,8 +1457,8 @@ static int cmd_deblur(int argc, char **argv)
         dsd4_deblur_info di;
         int r = dsd4_deblur_dng(argv[i], out ? out : argv[i], level, tone, &di);
         if (r == DSD4_ERR_PARAM && tone < 0)
-            fprintf(stderr, "dsdual4: %s: a raw scan (or not a dsdual4 DNG); say --film slide|nega|...\n", argv[i]);
-        else if (r) fprintf(stderr, "dsdual4: %s: deblur failed (%d)\n", argv[i], r);
+            fprintf(stderr, "dsd4: %s: a raw scan (or not a dsd4 DNG); say --film slide|nega|...\n", argv[i]);
+        else if (r) fprintf(stderr, "dsd4: %s: deblur failed (%d)\n", argv[i], r);
         else report_deblur(argv[i], &di);
         rc |= r != 0;
     }
@@ -1480,12 +1471,12 @@ static int cmd_convert(int argc, char **argv)
     dsd4_film film = DSD4_FILM_NEGATIVE_BW;
     double ex[3] = { 0, 0, 0 };
     int bits = 16;
-    static const char *use = "usage: dsdual4 convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n";
+    static const char *use = "usage: dsd4 convert IN.tiff -o OUT.tiff --film bw-nega|nega [--scan-exposure f]\n";
     for (int k = 1; k < argc; k++) {
         if (!strcmp(argv[k], "-o") && k + 1 < argc) out = argv[++k];
         else if (!strcmp(argv[k], "--film") && k + 1 < argc) {
             if (parse_film(argv[++k], &film) || (film != DSD4_FILM_NEGATIVE_BW && film != DSD4_FILM_NEGATIVE_COLOR)) {
-                fprintf(stderr, "dsdual4: convert needs --film nega or bw-nega\n");
+                fprintf(stderr, "dsd4: convert needs --film nega or bw-nega\n");
                 return 2;
             }
         } else if (!strcmp(argv[k], "--scan-exposure") && k + 1 < argc) {
@@ -1505,14 +1496,14 @@ static int cmd_convert(int argc, char **argv)
     }
     dsd4_image src, dst;
     int r = dsd4_read_tiff(in, &src);
-    if (r) { fprintf(stderr, "dsdual4: cannot read %s (uncompressed 16-bit TIFF needed)\n", in); return 1; }
-    if (src.bits != 16) { fprintf(stderr, "dsdual4: %s is not a 16-bit (raw) scan\n", in); dsd4_image_free(&src); return 1; }
+    if (r) { fprintf(stderr, "dsd4: cannot read %s (uncompressed 16-bit TIFF needed)\n", in); return 1; }
+    if (src.bits != 16) { fprintf(stderr, "dsd4: %s is not a 16-bit (raw) scan\n", in); dsd4_image_free(&src); return 1; }
     if (!src.dpi) src.dpi = 3200;
     dsd4_minolta_info info;
     r = dsd4_minolta_convert(&src, film, ex, &dst, &info);
     dsd4_image_free(&src);
-    if (r == DSD4_ERR_IO) { fprintf(stderr, "dsdual4: no calibration cache: run 'dsdual4 init' with the scanner first\n"); return 1; }
-    if (r) { fprintf(stderr, "dsdual4: conversion failed: %s\n", dsd4_strerror(r)); return 1; }
+    if (r == DSD4_ERR_IO) { fprintf(stderr, "dsd4: no calibration cache: run 'dsd4 init' with the scanner first\n"); return 1; }
+    if (r) { fprintf(stderr, "dsd4: conversion failed: %s\n", dsd4_strerror(r)); return 1; }
     if (bits == 8) {
         size_t n = (size_t)dst.width * dst.height * dst.channels;
         for (size_t i = 0; i < n; i++) dst.data[i] = (uint8_t)(((uint16_t *)dst.data)[i] >> 8);
@@ -1545,7 +1536,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "-v", 2)) g_verbose += (int)strlen(argv[i]) - 1;
         else if (!strcmp(argv[i], "-q")) g_verbose = 0;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { usage(); return 0; }
-        else if (!strcmp(argv[i], "--version")) { printf("dsdual4 %s (%s)\n", DSD4_VERSION, DSD4_COMMIT); return 0; }
+        else if (!strcmp(argv[i], "--version")) { printf("dsd4 %s (%s)\n", DSD4_VERSION, DSD4_COMMIT); return 0; }
         else { fprintf(stderr, "unknown option %s\n", argv[i]); usage(); return 2; }
     }
     const char *cmd = i < argc ? argv[i] : "menu";
@@ -1553,6 +1544,10 @@ int main(int argc, char **argv)
     int cargc = i < argc ? argc - i : 0;
     char **cargv = argv + i;
     g_progress_tty = isatty(2);
+    {   /* settings folder: moved from its dsdual4 name on the first run */
+        char sp[PATH_MAX];
+        dsd4_support_path("", sp, sizeof sp);
+    }
     if (!fw) fw = find_firmware(argv[0]);
     if (!no_profile) load_profile(argv[0], profile);
 
@@ -1568,12 +1563,12 @@ int main(int argc, char **argv)
     for (int k = 1; k < cargc; k++) if (!strcmp(cargv[k], "--wait")) wait = 1;
     if (use_sim) {
         dsd4_transport *t = dsd4_sim_open(fw, err, sizeof err);
-        if (!t || dsd4_open_transport(&s, t)) { fprintf(stderr, "dsdual4: %s\n", err); return 1; }
+        if (!t || dsd4_open_transport(&s, t)) { fprintf(stderr, "dsd4: %s\n", err); return 1; }
     } else {
         int said = 0;
         while (dsd4_open_usb(&s, err, sizeof err)) {
-            if (!wait) { fprintf(stderr, "dsdual4: %s\n", err); return 1; }
-            if (!said++) fprintf(stderr, "dsdual4: waiting for the scanner (%s)\n", err);
+            if (!wait) { fprintf(stderr, "dsd4: %s\n", err); return 1; }
+            if (!said++) fprintf(stderr, "dsd4: waiting for the scanner (%s)\n", err);
             sleep(5);
         }
     }
@@ -1701,7 +1696,7 @@ int main(int argc, char **argv)
                 support_path("scanner-mtf-1x.conf", p1, sizeof p1);
                 support_path("scanner-mtf-multi.conf", p2, sizeof p2);
                 if (dsd4_mtf_read(p1, &pr[0]) || dsd4_mtf_read(p2, &pr[1]) || !pr[0].measured[1] || !pr[1].measured[1]) {
-                    fprintf(stderr, "dsdual4: research grain needs the MTF along the carriage first: research mtf\n");
+                    fprintf(stderr, "dsd4: research grain needs the MTF along the carriage first: research mtf\n");
                     rc = 1;
                 } else {
                     const int hn = !dsd4_noise_read(support_path("scanner-noise.conf", path, sizeof path), &np);

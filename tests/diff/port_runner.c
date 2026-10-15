@@ -1,4 +1,4 @@
-/* Runs scenario.txt against libdsdual4 and prints a canonical trace of
+/* Runs scenario.txt against libdsd4 and prints a canonical trace of
  * everything sent to / received from the (simulated) scanner. */
 #include "dsd4_internal.h"
 

@@ -1,12 +1,24 @@
 #!/bin/sh
 # Start the Image Capture service for the logged-in user (it also starts at
 # every login from /Library/LaunchAgents).
-PLIST=/Library/LaunchAgents/org.dsdual4.airscan.plist
+PLIST=/Library/LaunchAgents/org.dsd4.airscan.plist
 chown root:wheel "$PLIST"; chmod 644 "$PLIST"
 USER_ID=$(stat -f %u /dev/console 2>/dev/null)
+# an install from before the rename to dsd4 (dsdual4): its service and files
+# go; a firmware file placed in its folder by hand is kept
 if [ -n "$USER_ID" ] && [ "$USER_ID" != 0 ]; then
     launchctl bootout "gui/$USER_ID/org.dsdual4.airscan" 2>/dev/null
-    launchctl enable "gui/$USER_ID/org.dsdual4.airscan" 2>/dev/null
+fi
+rm -f /Library/LaunchAgents/org.dsdual4.airscan.plist /usr/local/bin/dsdual4 \
+      /usr/local/lib/libdsdual4.a /usr/local/include/dsdual4.h
+if [ -f /usr/local/share/dsdual4/DS_Dual4.BIN ] && [ ! -f /usr/local/share/dsd4/DS_Dual4.BIN ]; then
+    mv /usr/local/share/dsdual4/DS_Dual4.BIN /usr/local/share/dsd4/
+fi
+rm -rf /usr/local/share/dsdual4
+pkgutil --forget org.dsdual4.driver >/dev/null 2>&1
+if [ -n "$USER_ID" ] && [ "$USER_ID" != 0 ]; then
+    launchctl bootout "gui/$USER_ID/org.dsd4.airscan" 2>/dev/null
+    launchctl enable "gui/$USER_ID/org.dsd4.airscan" 2>/dev/null
     launchctl bootstrap "gui/$USER_ID" "$PLIST" 2>/dev/null
 fi
 exit 0

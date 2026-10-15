@@ -8,7 +8,7 @@
  * dominates, structure-weighted, no halos).  Noise reduction follows Neat
  * Image's model: a noise profile per detail scale and brightness, colour
  * reduced more than brightness; here from two measured parts, the Dual IV's
- * sensor (dsdual4 research noise) and the film's grain, profiled from the
+ * sensor (dsd4 research noise) and the film's grain, profiled from the
  * flattest areas of each scan.
  *
  * Works on the raw linear scan, where both apply: the scanner blurs the light

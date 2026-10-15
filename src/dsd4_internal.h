@@ -10,7 +10,7 @@
 #ifndef DSD4_INTERNAL_H
 #define DSD4_INTERNAL_H
 
-#include "dsdual4.h"
+#include "dsd4.h"
 #include "transport.h"
 #include <stdint.h>
 #include <stdio.h>

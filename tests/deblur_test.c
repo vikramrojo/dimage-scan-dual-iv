@@ -2,7 +2,7 @@
  * grain, blurred by a known gaussian.  The measured blur must match, the
  * result must be closer to the sharp picture than the blurred one, and a
  * sharp picture must be left alone. */
-#include "dsdual4.h"
+#include "dsd4.h"
 
 #include <math.h>
 #include <stdint.h>
