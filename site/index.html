@@ -119,8 +119,16 @@ dsd4 deblur scan.dng --level high</code></pre>
 
 <section id="experimental">
   <div class="center stack">
-    <h2>4000 dpi <span class="tag" data-variant="outline">Experimental</span></h2>
-    <p>Sharper scans than the scanner alone delivers. dsd4 undoes the scanner's own measured blur, reduces sensor and colour noise without smoothing the grain, and enlarges to 4000 dpi. Based on Norman Koren's film-scanner MTF studies.</p>
+    <h2>Sharpen, denoise, 4000 dpi <span class="tag" data-variant="outline">Experimental</span></h2>
+    <p>Sharper, cleaner scans than the scanner alone delivers, based on Norman Koren's film-scanner MTF studies. Three options, on their own or together:</p>
+    <ul>
+      <li><strong>Sharpen:</strong> undoes the scanner's own measured blur. Grain is not sharpened.</li>
+      <li><strong>Denoise:</strong> removes sensor and colour noise. Low keeps the grain; high also softens it.</li>
+      <li><strong>4000 dpi:</strong> sharpens and enlarges a 3200 dpi scan to 4000 dpi.</li>
+    </ul>
+    <pre><code>dsd4 scan --samples 2 --experimental sharpen,denoise-low -o x.tiff
+dsd4 scan --experimental 4000dpi -o x.tiff</code></pre>
+    <p>In the menu: Device &amp; output settings → Experimental.</p>
     <table>
       <thead><tr><th>Razor-blade edge</th><th>MTF50</th></tr></thead>
       <tbody>
