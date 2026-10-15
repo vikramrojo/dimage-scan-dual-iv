@@ -11,7 +11,7 @@ RELEASES="https://github.com/$REPO/releases"
 href="$RELEASES/latest"
 label="Download the latest release"
 file="the latest dsd4 package"
-note="macOS 11 or later, Apple silicon and Intel"
+note="latest release"
 if command -v gh >/dev/null 2>&1 &&
    info=$(gh release view --repo "$REPO" --json tagName,publishedAt,assets \
           -q '[.tagName, (.publishedAt | split("T")[0]), ([.assets[] | select(.name | endswith(".pkg"))][0] | .name, .url)] | @tsv' 2>/dev/null) &&
@@ -24,14 +24,16 @@ if command -v gh >/dev/null 2>&1 &&
         href=$url
         label="Download $name"
         file=$name
-        note="$tag, released $date · macOS 11 or later"
+        note="$tag, $date"
     fi
 else
     echo "note: no release found (or gh unavailable): linking the Releases page" >&2
 fi
 
-rm -rf _site
-cp -R site _site
+# emptied in place, not replaced: a server running in _site keeps working
+mkdir -p _site
+find _site -mindepth 1 -delete
+cp -R site/. _site/
 rm -f _site/build.sh
 # placeholders; values contain no '|' (URLs, file names, dates)
 sed -i.bak \

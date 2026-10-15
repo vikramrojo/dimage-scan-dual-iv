@@ -3,299 +3,162 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dsd4: the Konica Minolta DiMAGE Scan Dual IV on modern macOS</title>
-<meta name="description" content="A native driver for the Konica Minolta DiMAGE Scan Dual IV film scanner on Apple silicon and Intel Macs: raw DNG, colour profiles, HDR, negatives, fast autofocus, deblur and an experimental 4000 dpi mode.">
-<!-- largen (https://largen.dev): tokens, layout primitives, data-tone/variant/size -->
+<title>dsd4: DiMAGE Scan Dual IV driver for macOS</title>
+<meta name="description" content="Driver for the Konica Minolta DiMAGE Scan Dual IV film scanner on macOS 11 and later.">
+<!-- largen (https://largen.dev): tokens, layout primitives, data-tone/variant -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/largen@0.6.3/dist/largen.css"
       integrity="sha384-uieeKJoPhSt2bGIDgP5KWiEFD8h6b+Qb6H9hCszWv3hEe5ERll1tb99uyIvV2odn" crossorigin="anonymous">
 <style>
-/* largen's tokens: warm paper, film-orange accent; dark mode overrides the same tokens */
+/* DiMAGE white and gray */
 :root {
-  color-scheme: light dark;
-  --canvas: #fbfaf7; --ink: #1d1d1b; --ink-muted: #5d5b55; --surface: #f1eee7; --line: #e4e1d9;
-  --primary: #b3471b; --primary-on: #ffffff;
-  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
-  --text-base: 1.0625rem; --line-height-base: 1.6;
-  --card: #ffffff;
+  --canvas: #ffffff; --ink: #222222; --ink-muted: #6b6b6b; --surface: #f2f2f2; --line: #dcdcdc;
+  --primary: #3c3c3c; --primary-on: #ffffff;
+  --font-ui: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --text-base: 1rem; --line-height-base: 1.55;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --canvas: #161615; --ink: #ecebe6; --ink-muted: #a8a59c; --surface: #262624; --line: #2f2e2b;
-    --primary: #e07a4c; --primary-on: #161615; --neutral: #ecebe6; --neutral-on: #161615;
-    --card: #1e1e1c;
-  }
-}
-/* the page's own pieces, through largen's slots */
 body { --tone: var(--primary); }
-.center { --measure: 68rem; --pad: 0 var(--space-6); }
-header, main > section { border-block-end: var(--hairline) solid var(--line); }
-header { padding-block: var(--space-16) var(--space-12); }
-.eyebrow { --fg: var(--ink-muted); --font-size: .9rem; --letter-spacing: .06em; text-transform: uppercase; margin: 0; }
-h1 { --font-size: clamp(2.2rem, 5vw, 3.4rem); --line-height: 1.1; --letter-spacing: -.02em; margin: 0; }
-.lede { --font-size: 1.2rem; --fg: var(--ink-muted); max-inline-size: 42rem; margin: 0; }
-.button { --pad: .8rem 1.4rem; --radius: var(--radius-md); --weight: var(--weight-bold); text-decoration: none; }
+.center { --measure: 46rem; --pad: 0 var(--space-6); }
+header { padding-block: var(--space-12) var(--space-8); border-block-end: var(--hairline) solid var(--line); }
+header .stack { --gap: var(--space-3); }
+h1 { --font-size: 2rem; --weight: var(--weight-bold); --letter-spacing: -.01em; margin: 0; }
+h2 { --font-size: 1.15rem; --weight: var(--weight-bold); margin: 0; }
+p, ul, ol { margin: 0; }
+ul, ol { padding-inline-start: 1.2rem; }
 .muted { --fg: var(--ink-muted); }
-nav.toc { padding-block: var(--space-4); border-block-end: var(--hairline) solid var(--line); --font-size: .95rem; }
-nav.toc .cluster { --gap: .4rem 1.2rem; }
-nav.toc a { --fg: var(--ink); text-decoration: none; }
-nav.toc a:hover { --fg: var(--primary); }
-main > section { padding-block: var(--space-12); }
-h2 { --font-size: 1.75rem; --line-height: 1.2; --letter-spacing: -.01em; margin: 0; }
-h3 { --font-size: 1.1rem; margin: 0; }
-.tag { --pad: .1rem .55rem; --radius: 1rem; --font-size: .8rem; --weight: var(--weight-bold); vertical-align: middle; margin-inline-start: .4rem; }
-.intro { --fg: var(--ink-muted); max-inline-size: 46rem; margin: 0; }
-.grid { --min-item: 17rem; --gap: var(--space-4);
-        grid-template-columns: repeat(auto-fit, minmax(min(var(--min-item), 100%), 1fr)); }
-.card { --bg: var(--card); --border-color: var(--line); --border-width: var(--hairline); --border-style: solid;
-        --radius: var(--radius-lg); --pad: var(--space-6); }
-.card .stack { --gap: var(--space-2); }
-.card p, .card ul { margin: 0; }
-.card ul { padding-inline-start: 1.2rem; }
-:where(code):not(pre code) { --bg: var(--surface); --pad: .08em .35em; --radius: .3em; --font-size: .88em; }
-pre { --bg: var(--surface); --pad: var(--space-4) 1.15rem; --radius: var(--radius-md); --font-size: .88rem; overflow-x: auto; margin: 0; }
-pre .c { --fg: var(--ink-muted); }
+.actions { --gap: .5rem 1rem; margin-block-start: var(--space-2); }
+.button { --pad: .55rem 1rem; --radius: var(--radius-sm); --weight: var(--weight-medium); text-decoration: none; }
+main section { padding-block: var(--space-8); border-block-end: var(--hairline) solid var(--line); }
+main section > .stack { --gap: var(--space-3); }
+.tag { --border-style: solid; --pad: 0 .45rem; --radius: var(--radius-sm); --font-size: .75rem; --weight: var(--weight-medium); vertical-align: middle; margin-inline-start: .3rem; }
+:where(code):not(pre code) { --bg: var(--surface); --pad: .05em .3em; --radius: .25em; --font-size: .88em; }
+pre { --bg: var(--surface); --pad: var(--space-3) var(--space-4); --radius: var(--radius-sm); --font-size: .85rem; overflow-x: auto; margin: 0; }
 figure { margin: 0; }
-.compare { --min-item: 14rem; --gap: .6rem; }
-.compare img { inline-size: 100%; display: block; --radius: .4rem; }
-figcaption { --fg: var(--ink-muted); --font-size: .88rem; margin-block-start: .3rem; }
+.compare { --min-item: 12rem; --gap: .5rem;
+           grid-template-columns: repeat(auto-fit, minmax(min(var(--min-item), 100%), 1fr)); }
+.compare img { inline-size: 100%; display: block; }
+figcaption { --fg: var(--ink-muted); --font-size: .85rem; margin-block-start: .25rem; }
 td.num { font-variant-numeric: tabular-nums; text-align: end; }
-ol.steps { padding-inline-start: 1.3rem; margin: 0; }
-footer { padding-block: var(--space-8) var(--space-12); --fg: var(--ink-muted); --font-size: .9rem; }
-footer p { margin: 0; max-inline-size: 50rem; }
-.hero { --gap: var(--space-4); }
-.actions { --gap: .75rem 1.25rem; margin-block-start: var(--space-4); }
-.figures { --gap: .6rem; }
-ol.steps li + li { margin-block-start: .45rem; }
-footer .stack { --gap: .4rem; }
+footer { padding-block: var(--space-6) var(--space-12); --fg: var(--ink-muted); --font-size: .85rem; }
 </style>
 </head>
 <body>
 <header>
-  <div class="center stack hero">
-    <p class="eyebrow">Konica Minolta DiMAGE Scan Dual IV · macOS 11 and later</p>
-    <h1>Your film scanner,<br>back on a modern Mac.</h1>
-    <p class="lede"><strong>dsd4</strong> is a native driver for the DiMAGE Scan Dual IV. It runs on Apple silicon and Intel Macs, entirely in user space with no kernel extension. It brings raw DNG, colour profiles, HDR, the original Minolta negative processing, faster autofocus and new ways to recover sharpness.</p>
+  <div class="center stack">
+    <h1>dsd4</h1>
+    <p>Driver for the Konica Minolta DiMAGE Scan Dual IV on macOS 11 and later, Apple silicon and Intel. No kernel extension.</p>
     <div class="cluster actions">
       <a class="button" data-tone="primary" data-variant="solid" href="@DOWNLOAD_HREF@">@DOWNLOAD_LABEL@</a>
-      <span class="muted">@RELEASE_NOTE@ · <a href="@RELEASES_URL@">All releases</a> · <a href="https://github.com/vikramrojo/dimage-scan-dual-iv">Source on GitHub</a></span>
+      <span class="muted">@RELEASE_NOTE@ · <a href="@RELEASES_URL@">Releases</a> · <a href="https://github.com/vikramrojo/dimage-scan-dual-iv">Source</a></span>
     </div>
   </div>
 </header>
-
-<nav class="toc" aria-label="Contents">
-  <div class="center"><ul class="cluster">
-    <li><a href="#dng">Raw DNG</a></li>
-    <li><a href="#colour">Colour</a></li>
-    <li><a href="#hdr">HDR</a></li>
-    <li><a href="#negatives">Negatives</a></li>
-    <li><a href="#autofocus">Autofocus</a></li>
-    <li><a href="#deblur">Deblur</a></li>
-    <li><a href="#experimental">Experimental 4000 dpi</a></li>
-    <li><a href="#install">Install</a></li>
-    <li><a href="#cli">Command line</a></li>
-  </ul></div>
-</nav>
 
 <main>
 <section id="dng">
   <div class="center stack">
     <h2>Raw DNG</h2>
-    <p class="intro">Save the scanner's own linear data as a DNG that Lightroom, darktable, Negative Lab Pro, Photos and Preview open directly.</p>
-    <div class="grid">
-      <div class="card"><div class="stack">
-        <h3>Calibrated colour</h3>
-        <p>Each DNG carries Konica Minolta's own scanner calibration: the matrix and per-channel curves of its input profile. Raw converters show the same colour as the profiled TIFF.</p>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>Positive DNGs that look right</h3>
-        <p>Negatives can also be saved as a ready-made positive DNG, with Minolta's film curves or a simple invert. In Preview and Photos they match the Minolta TIFF to within about 0.5&nbsp;ΔE, with no extra contrast curve or black clip from the raw engine.</p>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>Multi-sampling, kept precise</h3>
-        <p>Read each line 2, 4 or 8 times for about √N less noise; single bad reads are discarded. The averaged result is stored as a 16-bit float DNG instead of being rounded.</p>
-      </div></div>
-    </div>
+    <p>Linear scanner data with Konica Minolta's colour calibration. Opens in Lightroom, darktable, Negative Lab Pro and Photos. Negatives can also be saved as positive DNGs, which match the Minolta TIFF in Preview. Multi-sampled scans are kept as float.</p>
   </div>
 </section>
 
 <section id="colour">
   <div class="center stack">
     <h2>Colour profiles</h2>
-    <p class="intro">Scans come out as linear 16-bit device RGB, tagged with the profile that describes them, so colour-managed apps show them correctly.</p>
-    <div class="grid">
-      <div class="card"><div class="stack">
-        <h3>Slides</h3>
-        <p>Colour slide scans embed Konica Minolta's <code>MLTF3200p.icc</code> (“Posi Linear”), the profile the original software used.</p>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>Negatives</h3>
-        <p>Minolta-processed colour negatives embed <code>MLTF3200n.icc</code> (“Nega Input”). Black-and-white scans are tagged with matching gray profiles.</p>
-      </div></div>
-    </div>
+    <p>Slides embed <code>MLTF3200p.icc</code>, Minolta-processed negatives <code>MLTF3200n.icc</code>: the original software's profiles.</p>
   </div>
 </section>
 
 <section id="hdr">
   <div class="center stack">
     <h2>HDR</h2>
-    <p class="intro">Dense film hides detail in noise: the shadows of slides, the highlights of negatives. HDR scans each frame twice and merges the passes.</p>
-    <div class="grid">
-      <div class="card"><div class="stack">
-        <h3>Two exposures, aligned</h3>
-        <p>The second pass is 2 stops brighter. It is aligned to the first to within a fraction of a line and merged in linear light, giving about 4× less noise in the dense areas.</p>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>With Minolta processing</h3>
-        <p>HDR also works with Minolta processing. The original auto-exposure runs first, then the film curves are applied to the merged scan. Output is a raw or positive DNG.</p>
-      </div></div>
-    </div>
+    <p>A second pass 2 stops brighter, aligned and merged: about 4× less noise in dense areas. Works with Minolta processing.</p>
   </div>
 </section>
 
 <section id="negatives">
   <div class="center stack">
-    <h2>Negatives, three ways</h2>
-    <p class="intro">The scanner itself never inverts negatives. dsd4 offers three ways to handle them, for TIFF and DNG alike.</p>
-    <div class="grid">
-      <div class="card"><div class="stack">
-        <h3>Minolta processing</h3>
-        <p>The original software's pipeline, ported faithfully: autofocus, an auto-exposure prescan, a rescan at the chosen exposure, and the original film curves. It is the default, and previews can use it too.</p>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>Simple invert</h3>
-        <p>Works in density, like the film itself: it removes the orange mask and balances the channels' contrast.</p>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>Raw negative</h3>
-        <p>Keeps the negative as scanned, for Negative Lab Pro, darktable and similar tools to invert.</p>
-      </div></div>
-    </div>
+    <h2>Negatives</h2>
+    <ul>
+      <li><strong>Minolta processing:</strong> the original auto-exposure and film curves.</li>
+      <li><strong>Simple invert:</strong> in density, orange mask removed.</li>
+      <li><strong>Raw:</strong> left negative, for Negative Lab Pro.</li>
+    </ul>
   </div>
 </section>
 
 <section id="autofocus">
   <div class="center stack">
-    <h2>Faster autofocus</h2>
-    <p class="intro">A new search finds focus with about a third of the original's lens moves, fitting the contrast peak between steps. When the centre of the frame has no detail, it tries other parts of the frame. The original sequence is still available with <code>--af classic</code>.</p>
+    <h2>Autofocus</h2>
+    <p>About a third of the original's lens moves. <code>--af classic</code> runs the original sequence.</p>
   </div>
 </section>
 
 <section id="deblur">
   <div class="center stack">
     <h2>Deblur</h2>
-    <p class="intro">Recovers sharpness lost to a missed focus in the camera, so the photograph itself, not the scan. The blur is measured across each frame, and frames that are already sharp are left alone.</p>
-    <div class="grid">
-      <div class="card"><div class="stack">
-        <h3>Looks like a sharper lens</h3>
-        <ul>
-          <li>Brightness only: colour stays as shot.</li>
-          <li>Film grain and dust are kept out of the sharpening and added back unchanged.</li>
-          <li>No halos around edges or dust, no blotches on skin.</li>
-        </ul>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>Low or high</h3>
-        <p>Low removes about 60% of the measured blur, high about 90%. Use it as a scan option (<code>--deblur</code>), a menu setting, or on existing DNGs, which stay raw:</p>
-        <pre><code>dsd4 deblur scan.dng --level low</code></pre>
-      </div></div>
+    <p>Reduces camera blur from a missed focus. The blur is measured per region; sharp frames are left alone, and grain and colour are kept.</p>
+    <div class="grid compare">
+      <figure><img src="img/deblur-original.webp" width="600" height="300" alt="Eyes in a portrait, soft from a missed focus" loading="lazy"><figcaption>Original</figcaption></figure>
+      <figure><img src="img/deblur-low.webp" width="600" height="300" alt="The same eyes, deblur low" loading="lazy"><figcaption>Low</figcaption></figure>
+      <figure><img src="img/deblur-high.webp" width="600" height="300" alt="The same eyes, deblur high" loading="lazy"><figcaption>High</figcaption></figure>
     </div>
-    <figure class="stack figures">
-      <div class="grid compare">
-        <figure><img src="img/deblur-face-original.jpg" width="600" height="480" alt="Portrait scanned from a negative, soft from a missed focus" loading="lazy"><figcaption>Original</figcaption></figure>
-        <figure><img src="img/deblur-face-low.jpg" width="600" height="480" alt="The same portrait after deblur low: slightly crisper eyes and hair" loading="lazy"><figcaption>Deblur low</figcaption></figure>
-        <figure><img src="img/deblur-face-high.jpg" width="600" height="480" alt="The same portrait after deblur high: clearly crisper eyes, teeth and hair" loading="lazy"><figcaption>Deblur high</figcaption></figure>
-      </div>
-      <div class="grid compare">
-        <figure><img src="img/deblur-eyes-original.jpg" width="600" height="300" alt="Eye detail, original" loading="lazy"><figcaption>Original, eye detail</figcaption></figure>
-        <figure><img src="img/deblur-eyes-low.jpg" width="600" height="300" alt="Eye detail after deblur low" loading="lazy"><figcaption>Low</figcaption></figure>
-        <figure><img src="img/deblur-eyes-high.jpg" width="600" height="300" alt="Eye detail after deblur high, with the film grain unchanged" loading="lazy"><figcaption>High</figcaption></figure>
-      </div>
-      <figcaption>A 3200 dpi scan with about 3.5 px of camera blur. The grain looks the same in all three: only the picture underneath is sharpened.</figcaption>
-    </figure>
+    <pre><code>dsd4 scan --deblur low -o d.tiff
+dsd4 deblur scan.dng --level high</code></pre>
   </div>
 </section>
 
 <section id="experimental">
   <div class="center stack">
-    <h2>4000 dpi sharpness <span class="tag" data-tone="primary" data-variant="soft">Experimental</span></h2>
-    <p class="intro">After Norman Koren's film-scanner MTF studies: a scanner's own optics and sensor cost a 3200 dpi scan a good part of its sharpness. Undoing that loss gains more than anything else, as long as the grain isn't boosted with it.</p>
-    <div class="grid">
-      <div class="card"><div class="stack">
-        <h3>Sharpen</h3>
-        <p>Undoes the scanner's own measured blur, on brightness only. Each level of detail is boosted only where the picture is stronger than the sensor's noise, mostly at edges, and never past the finest detail the scanner records, or into halos.</p>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>Denoise</h3>
-        <p>Low removes sensor and colour noise and keeps the grain; high also reduces the grain. It uses the scanner's measured noise, plus a grain profile taken from the flattest parts of each frame, like Neat Image's auto-profile.</p>
-      </div></div>
-      <div class="card"><div class="stack">
-        <h3>4000 dpi</h3>
-        <p>Sharpens a 3200 dpi scan and resamples it to 4000 dpi. It runs on the raw scan, before inversion or film curves, so TIFF and DNG output both benefit, and DNGs stay raw.</p>
-      </div></div>
-    </div>
-
-    <h3>Measured on a razor-blade edge</h3>
+    <h2>4000 dpi <span class="tag" data-tone="neutral" data-variant="outline">Experimental</span></h2>
+    <p>Undoes the scanner's own measured blur, reduces sensor and colour noise, and resamples to 4000 dpi. Grain is not sharpened. Based on Norman Koren's film-scanner MTF studies.</p>
     <table>
-      <thead><tr><th>Version</th><th>Sharpness on the film (MTF50)</th></tr></thead>
+      <thead><tr><th>Razor-blade edge</th><th>MTF50</th></tr></thead>
       <tbody>
-        <tr><td>Original 3200 dpi scan</td><td class="num">44.8 lp/mm</td></tr>
-        <tr><td>Resampled to 4000 dpi by macOS (Preview)</td><td class="num">35.3 lp/mm</td></tr>
-        <tr><td>dsd4 <code>--experimental 4000dpi</code></td><td class="num">53.8 lp/mm</td></tr>
+        <tr><td>3200 dpi scan</td><td class="num">44.8 lp/mm</td></tr>
+        <tr><td>Resampled to 4000 by macOS</td><td class="num">35.3 lp/mm</td></tr>
+        <tr><td><code>--experimental 4000dpi</code></td><td class="num">53.8 lp/mm</td></tr>
       </tbody>
     </table>
-    <p class="intro">Resampling can't add detail the scanner didn't record. What it can do is avoid softening the picture, and undo the scanner's own blur.</p>
-
-    <figure class="stack figures">
-      <div class="grid compare">
-        <figure><img src="img/lettering-3200.jpg" width="720" height="300" alt="Lettering on a bicycle frame, 3200 dpi scan enlarged" loading="lazy"><figcaption>3200 dpi</figcaption></figure>
-        <figure><img src="img/lettering-sharpen.jpg" width="720" height="300" alt="The same lettering with experimental sharpen: crisper letter edges and inner outlines" loading="lazy"><figcaption>Sharpen</figcaption></figure>
-        <figure><img src="img/lettering-4000.jpg" width="720" height="300" alt="The same lettering at 4000 dpi with denoise low: crisp, with less colour speckle" loading="lazy"><figcaption>4000 dpi + denoise low</figcaption></figure>
-      </div>
-      <figcaption>The same piece of film, enlarged equally. Sharpen crisps the lettering without halos; 4000 dpi with denoise low also removes colour speckle and keeps the grain.</figcaption>
-    </figure>
-
-    <h3>Calibrate your own scanner (optional)</h3>
-    <p>Without calibration, dsd4 uses a typical Dual IV, measured on one unit, and sharpens at 70% strength so as not to over-correct another unit's optics. For the exact correction:</p>
-    <pre><code>dsd4 research mtf    <span class="c"># a razor blade taped into a slide mount, edge turned 2–20°</span>
-dsd4 research grain  <span class="c"># a film frame with flat areas: sky or blank film</span>
-dsd4 research noise  <span class="c"># blank film or an empty mount</span>
-dsd4 mtf scan.dng    <span class="c"># measure any scan of the blade, to compare</span></code></pre>
+    <div class="grid compare">
+      <figure><img src="img/lettering-3200.webp" width="720" height="300" alt="Bicycle lettering, 3200 dpi" loading="lazy"><figcaption>3200 dpi</figcaption></figure>
+      <figure><img src="img/lettering-sharpen.webp" width="720" height="300" alt="The same lettering, sharpened" loading="lazy"><figcaption>Sharpen</figcaption></figure>
+      <figure><img src="img/lettering-4000.webp" width="720" height="300" alt="The same lettering at 4000 dpi, denoise low" loading="lazy"><figcaption>4000 dpi, denoise low</figcaption></figure>
+    </div>
+    <p>Uses a typical Dual IV's measurements unless you calibrate yours:</p>
+    <pre><code>dsd4 research mtf     # razor blade in a slide mount
+dsd4 research grain   # frame with sky or blank film
+dsd4 research noise   # blank film</code></pre>
   </div>
 </section>
 
 <section id="install">
   <div class="center stack">
     <h2>Install</h2>
-    <ol class="steps">
-      <li>Download <a href="@DOWNLOAD_HREF@">@DOWNLOAD_FILE@</a> and open it.</li>
-      <li>Connect and power on the scanner, insert a film holder and close the front door.</li>
-      <li>Scan from <strong>Image Capture</strong> or <strong>Preview → File → Import from Scanner</strong>, or type <code>dsd4</code> in Terminal for the full menu.</li>
+    <ol>
+      <li>Open <a href="@DOWNLOAD_HREF@">@DOWNLOAD_FILE@</a>.</li>
+      <li>Connect the scanner and insert a holder.</li>
+      <li>Scan from Image Capture or Preview, or run <code>dsd4</code> in Terminal.</li>
     </ol>
-    <p>Uninstall with <code>sudo /usr/local/share/dsd4/uninstall.sh</code>. To build from source, see the <a href="https://github.com/vikramrojo/dimage-scan-dual-iv#build-from-source">README</a>.</p>
   </div>
 </section>
 
 <section id="cli">
   <div class="center stack">
     <h2>Command line</h2>
-    <p class="intro"><code>dsd4</code> on its own opens a guided menu that remembers your settings. Every feature is also a command:</p>
-    <pre><code>dsd4 init                                       <span class="c"># warm up the lamp and calibrate</span>
-dsd4 scan --frame 3 --dpi 3200 -o s.tiff        <span class="c"># 16-bit TIFF</span>
-dsd4 scan --film nega --minolta -o n.tiff       <span class="c"># negative, Minolta processing</span>
-dsd4 scan --format dng --samples 4 -o r.dng     <span class="c"># raw DNG, 4x multi-sampled</span>
-dsd4 scan --film nega --minolta --hdr --format dng -o h.dng   <span class="c"># HDR, Minolta positive</span>
-dsd4 scan --deblur low -o d.tiff                <span class="c"># reduce camera blur</span>
-dsd4 scan --samples 2 --experimental sharpen,denoise-low -o x.tiff
-dsd4 scan-all --frames 4 -o roll                <span class="c"># a strip of four frames</span></code></pre>
-    <p><code>dsd4 --help</code> lists every command and option.</p>
+    <pre><code>dsd4
+dsd4 scan --dpi 3200 -o s.tiff
+dsd4 scan --film nega --minolta -o n.tiff
+dsd4 scan --format dng --samples 4 -o r.dng
+dsd4 scan --format dng --hdr -o h.dng
+dsd4 scan-all --frames 4 -o roll
+dsd4 --help</code></pre>
   </div>
 </section>
 </main>
 
 <footer>
-  <div class="center stack">
-    <p>dsd4 is an independent project, reverse engineered from the original PowerPC software, and is not affiliated with Konica Minolta. Its own code is MIT licensed. The translated Konica Minolta routines and colour profiles it includes are not. See the <a href="https://github.com/vikramrojo/dimage-scan-dual-iv#licence-and-provenance">licence and provenance</a> notes.</p>
-    <p>“DiMAGE” and “Konica Minolta” are trademarks of their owners.</p>
+  <div class="center">
+    <p>Independent project, not affiliated with Konica Minolta. MIT licensed, except the included Konica Minolta routines and profiles (<a href="https://github.com/vikramrojo/dimage-scan-dual-iv#licence-and-provenance">details</a>).</p>
   </div>
 </footer>
 </body>
