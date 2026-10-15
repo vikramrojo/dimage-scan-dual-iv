@@ -2,4 +2,3 @@ build/
 *.dSYM/
 *.tiff
 __pycache__/
-_site/
