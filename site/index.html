@@ -46,7 +46,7 @@ footer { padding-block: var(--space-6) var(--space-12); --fg: var(--ink-muted); 
 <header>
   <div class="center stack">
     <h1>dsd4</h1>
-    <p>Driver for the Konica Minolta DiMAGE Scan Dual IV on macOS 11 and later, Apple silicon and Intel. No kernel extension.</p>
+    <p>Use the Konica Minolta DiMAGE Scan Dual IV on a current Mac: macOS 11 and later, Apple silicon and Intel. No kernel extension.</p>
     <div class="cluster actions">
       <a class="button" data-tone="primary" data-variant="solid" href="@DOWNLOAD_HREF@">@DOWNLOAD_LABEL@</a>
       <span class="muted">@RELEASE_NOTE@ · <a href="@RELEASES_URL@">Releases</a> · <a href="https://github.com/vikramrojo/dimage-scan-dual-iv">Source</a></span>
@@ -58,32 +58,40 @@ footer { padding-block: var(--space-6) var(--space-12); --fg: var(--ink-muted); 
 <section id="dng">
   <div class="center stack">
     <h2>Raw DNG</h2>
-    <p>Linear scanner data with Konica Minolta's colour calibration, at the size of a 16-bit TIFF (88 MB a frame). Nothing is baked in: white balance, exposure and inversion stay adjustable in Lightroom, darktable or Negative Lab Pro.</p>
-    <p>Multi-sampled and HDR scans are stored as float, which keeps fine tonal steps in dense areas where a 16-bit TIFF has few. Negatives can also be saved as positive DNGs that match the Minolta TIFF in Preview.</p>
+    <p>Edit scans like camera raws. White balance, exposure and inversion stay adjustable in Lightroom, darktable or Negative Lab Pro, with the scanner's own colour calibration built in.</p>
+    <p>Multi-sampled and HDR scans keep extra tonal precision in dense areas, at the size of a 16-bit TIFF (88 MB a frame). Negatives can also be saved as ready-to-view positives that match the Minolta TIFF.</p>
   </div>
 </section>
 
 <section id="colour">
   <div class="center stack">
     <h2>Colour profiles</h2>
-    <p>Slides embed <code>MLTF3200p.icc</code>, Minolta-processed negatives <code>MLTF3200n.icc</code>: the original software's profiles.</p>
+    <p>Colours look right in any colour-managed app. Scans carry the original software's profiles: <code>MLTF3200p.icc</code> for slides, <code>MLTF3200n.icc</code> for negatives.</p>
+  </div>
+</section>
+
+<section id="multisampling">
+  <div class="center stack">
+    <h2>Multi-sampling</h2>
+    <p>Cleaner scans from the same film. As in the original software, each line is read 2, 4 or 8 times and averaged: noise drops about 1.4×, 2× or 2.8×, and a single bad read is discarded. Crops also come out sharper. Scans take longer.</p>
   </div>
 </section>
 
 <section id="hdr">
   <div class="center stack">
     <h2>HDR</h2>
-    <p>A second pass 2 stops brighter, aligned to the first and merged. In simulation, noise in the densest areas drops about 4×: up to 2 more stops of usable range in slide shadows and negative highlights. The file stays 88 MB. Works with Minolta processing.</p>
+    <p>Recovers detail in the densest parts of the film: slide shadows and negative highlights. A second, brighter pass is merged with the first. In simulation, noise there drops about 4×, up to 2 more stops of usable range. Same file size; works with Minolta processing.</p>
   </div>
 </section>
 
 <section id="negatives">
   <div class="center stack">
     <h2>Negatives</h2>
+    <p>Choose how negatives become positives:</p>
     <ul>
-      <li><strong>Minolta processing:</strong> the original auto-exposure and film curves.</li>
-      <li><strong>Simple invert:</strong> in density, orange mask removed.</li>
-      <li><strong>Raw:</strong> left negative, for Negative Lab Pro.</li>
+      <li><strong>Minolta processing:</strong> the original software's look, with its auto-exposure and film curves.</li>
+      <li><strong>Simple invert:</strong> a neutral starting point, orange mask removed.</li>
+      <li><strong>Raw:</strong> the untouched negative, for Negative Lab Pro.</li>
     </ul>
   </div>
 </section>
@@ -91,14 +99,14 @@ footer { padding-block: var(--space-6) var(--space-12); --fg: var(--ink-muted); 
 <section id="autofocus">
   <div class="center stack">
     <h2>Autofocus</h2>
-    <p>About a third of the original's lens moves. <code>--af classic</code> runs the original sequence.</p>
+    <p>Less waiting: focus takes about a third of the original's lens moves, and frames with an empty centre still focus. <code>--af classic</code> runs the original sequence.</p>
   </div>
 </section>
 
 <section id="deblur">
   <div class="center stack">
     <h2>Deblur</h2>
-    <p>Reduces camera blur from a missed focus. The blur is measured per region; sharp frames are left alone, and grain and colour are kept.</p>
+    <p>Rescues photos where the camera missed focus. The blur is measured across each frame; sharp frames are left alone, and grain and colour stay as they were.</p>
     <div class="grid compare">
       <figure><img src="img/deblur-original.webp" width="600" height="300" alt="Eyes in a portrait, soft from a missed focus" loading="lazy"><figcaption>Original</figcaption></figure>
       <figure><img src="img/deblur-low.webp" width="600" height="300" alt="The same eyes, deblur low" loading="lazy"><figcaption>Low</figcaption></figure>
@@ -112,7 +120,7 @@ dsd4 deblur scan.dng --level high</code></pre>
 <section id="experimental">
   <div class="center stack">
     <h2>4000 dpi <span class="tag" data-variant="outline">Experimental</span></h2>
-    <p>Undoes the scanner's own measured blur, reduces sensor and colour noise, and resamples to 4000 dpi. Grain is not sharpened. Based on Norman Koren's film-scanner MTF studies.</p>
+    <p>Sharper scans than the scanner alone delivers. dsd4 undoes the scanner's own measured blur, reduces sensor and colour noise without smoothing the grain, and enlarges to 4000 dpi. Based on Norman Koren's film-scanner MTF studies.</p>
     <table>
       <thead><tr><th>Razor-blade edge</th><th>MTF50</th></tr></thead>
       <tbody>
@@ -126,7 +134,7 @@ dsd4 deblur scan.dng --level high</code></pre>
       <figure><img src="img/lettering-sharpen.webp" width="720" height="300" alt="The same lettering, sharpened" loading="lazy"><figcaption>Sharpen</figcaption></figure>
       <figure><img src="img/lettering-4000.webp" width="720" height="300" alt="The same lettering at 4000 dpi, denoise low" loading="lazy"><figcaption>4000 dpi, denoise low</figcaption></figure>
     </div>
-    <p>Uses a typical Dual IV's measurements unless you calibrate yours:</p>
+    <p>It uses a typical Dual IV's measurements; calibrating yours gives the full correction:</p>
     <pre><code>dsd4 research mtf     # razor blade in a slide mount
 dsd4 research grain   # frame with sky or blank film
 dsd4 research noise   # blank film</code></pre>
